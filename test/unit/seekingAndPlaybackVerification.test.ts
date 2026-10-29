@@ -84,13 +84,14 @@ describe('Verification of 12 Seeking, Performance, and Cleanup Scenarios', () =>
 
     // Three consecutive rapid taps without awaiting between them
     const tap1 = usePlaybackStore.getState().skipBy(15);
-    expect(usePlaybackStore.getState().currentTimeMs).toBe(32000);
+    expect(usePlaybackStore.getState().previewPositionMs).toBe(32000);
+    expect(usePlaybackStore.getState().isSeeking).toBe(true);
 
     const tap2 = usePlaybackStore.getState().skipBy(15);
-    expect(usePlaybackStore.getState().currentTimeMs).toBe(47000);
+    expect(usePlaybackStore.getState().previewPositionMs).toBe(47000);
 
     const tap3 = usePlaybackStore.getState().skipBy(15);
-    expect(usePlaybackStore.getState().currentTimeMs).toBe(62000);
+    expect(usePlaybackStore.getState().previewPositionMs).toBe(62000);
 
     await Promise.all([tap1, tap2, tap3]);
 
@@ -107,9 +108,8 @@ describe('Verification of 12 Seeking, Performance, and Cleanup Scenarios', () =>
     expect(usePlaybackStore.getState().currentTimeMs).toBe(7000);
 
     await usePlaybackStore.getState().skipBy(-15);
-    expect(usePlaybackStore.getState().currentTimeMs).toBe(0);
-
     await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(usePlaybackStore.getState().currentTimeMs).toBe(0);
     expect(mockAdapter.getProgress().currentTimeMs).toBe(0);
   });
 
@@ -120,9 +120,8 @@ describe('Verification of 12 Seeking, Performance, and Cleanup Scenarios', () =>
     expect(usePlaybackStore.getState().currentTimeMs).toBe(142000);
 
     await usePlaybackStore.getState().skipBy(15);
-    expect(usePlaybackStore.getState().currentTimeMs).toBe(150000);
-
     await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(usePlaybackStore.getState().currentTimeMs).toBe(150000);
     expect(mockAdapter.getProgress().currentTimeMs).toBe(150000);
   });
 
@@ -139,15 +138,17 @@ describe('Verification of 12 Seeking, Performance, and Cleanup Scenarios', () =>
     usePlaybackStore.getState().startScrubbing();
     expect(usePlaybackStore.getState().isScrubbing).toBe(true);
 
-    // User drags finger to 50s
+    // User drags finger to 50s: preview updates, actual native position preserved
     usePlaybackStore.getState().moveScrubbing(50000);
     expect(usePlaybackStore.getState().scrubPositionMs).toBe(50000);
-    expect(usePlaybackStore.getState().currentTimeMs).toBe(50000);
+    expect(usePlaybackStore.getState().previewPositionMs).toBe(50000);
+    expect(usePlaybackStore.getState().currentTimeMs).toBe(20000);
 
     // User drags finger to 85s
     usePlaybackStore.getState().moveScrubbing(85000);
     expect(usePlaybackStore.getState().scrubPositionMs).toBe(85000);
-    expect(usePlaybackStore.getState().currentTimeMs).toBe(85000);
+    expect(usePlaybackStore.getState().previewPositionMs).toBe(85000);
+    expect(usePlaybackStore.getState().currentTimeMs).toBe(20000);
 
     // User releases finger
     await usePlaybackStore.getState().endScrubbing(85000);

@@ -1,5 +1,35 @@
 // Mock for Jest testing environment
 
+require('react-native-gesture-handler/jestSetup');
+
+jest.mock('react-native-reanimated', () => {
+  const React = require('react');
+  const { View, Text } = require('react-native');
+
+  return {
+    __esModule: true,
+    default: {
+      View,
+      Text,
+      createAnimatedComponent: (Component: any) => Component,
+    },
+    useSharedValue: (init: any) => ({ value: init }),
+    useAnimatedStyle: (updater: any) => updater(),
+    useEvent: (callback: any) => callback,
+    useHandler: () => ({ doDependenciesDiffer: false, context: { lastUpdateEvent: undefined } }),
+    useComposedEventHandler: () => jest.fn(),
+    setGestureState: jest.fn(),
+    isSharedValue: (val: any) => Boolean(val && typeof val === 'object' && 'value' in val),
+    withTiming: (toValue: any) => toValue,
+    withSpring: (toValue: any) => toValue,
+    runOnJS: (fn: any) => fn,
+    Easing: {
+      linear: (n: any) => n,
+      ease: (n: any) => n,
+    },
+  };
+});
+
 jest.mock('@react-native-async-storage/async-storage', () =>
   require('@react-native-async-storage/async-storage/jest/async-storage-mock')
 );

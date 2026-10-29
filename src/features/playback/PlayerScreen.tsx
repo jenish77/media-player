@@ -47,32 +47,28 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ navigation, route })
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
 
+  const state = usePlaybackStore((s) => s.state);
+  const currentMedia = usePlaybackStore((s) => s.currentMedia);
+  const nativePlayer = usePlaybackStore((s) => s.nativePlayer);
+  const playbackRate = usePlaybackStore((s) => s.playbackRate);
+  const volume = usePlaybackStore((s) => s.volume);
+  const brightness = usePlaybackStore((s) => s.brightness);
+  const aspectRatio = usePlaybackStore((s) => s.aspectRatio);
+  const isLocked = usePlaybackStore((s) => s.isLocked);
+  const areControlsVisible = usePlaybackStore((s) => s.areControlsVisible);
+  const audioTracks = usePlaybackStore((s) => s.audioTracks);
+  const subtitleTracks = usePlaybackStore((s) => s.subtitleTracks);
+  const activeAudioTrackId = usePlaybackStore((s) => s.activeAudioTrackId);
+  const activeSubtitleTrackId = usePlaybackStore((s) => s.activeSubtitleTrackId);
+  const subtitleCues = usePlaybackStore((s) => s.subtitleCues);
+  const subtitleDelayMs = usePlaybackStore((s) => s.subtitleDelayMs);
+  const audioDelayMs = usePlaybackStore((s) => s.audioDelayMs);
+  const error = usePlaybackStore((s) => s.error);
+  const orientationMode = usePlaybackStore((s) => s.orientationMode);
+  const hasPrevious = usePlaybackStore((s) => s.queueIndex > 0 || s.currentTimeMs > 0);
+  const hasNext = usePlaybackStore((s) => s.queueIndex >= 0 && s.queueIndex + 1 < s.queue.length);
+
   const {
-    state,
-    currentMedia,
-    nativePlayer,
-    currentTimeMs,
-    durationMs,
-    bufferedMs,
-    playbackRate,
-    volume,
-    brightness,
-    aspectRatio,
-    isLocked,
-    areControlsVisible,
-    audioTracks,
-    subtitleTracks,
-    activeAudioTrackId,
-    activeSubtitleTrackId,
-    subtitleCues,
-    subtitleDelayMs,
-    audioDelayMs,
-    error,
-    isScrubbing,
-    scrubPositionMs,
-    orientationMode,
-    queue,
-    queueIndex,
     playNext,
     playPrevious,
     toggleOrientation,
@@ -96,7 +92,7 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ navigation, route })
     setAudioDelay,
     reset,
     loadMedia,
-  } = usePlaybackStore();
+  } = usePlaybackStore.getState();
 
   const { settings, loadSettings } = useSettingsStore();
   const skipSeconds = settings.defaultSkipIntervalSeconds || 15;
@@ -325,38 +321,41 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ navigation, route })
   }, [toggleOrientation]);
 
   const handleCycleSpeed = useCallback(async () => {
+    const currentRate = usePlaybackStore.getState().playbackRate;
     const speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
-    const currentIndex = speeds.indexOf(playbackRate);
+    const currentIndex = speeds.indexOf(currentRate);
     const nextSpeed = speeds[(currentIndex + 1) % speeds.length];
-    await setPlaybackRate(nextSpeed);
-  }, [playbackRate, setPlaybackRate]);
+    await usePlaybackStore.getState().setPlaybackRate(nextSpeed);
+  }, []);
 
   const handleCycleAspectRatio = useCallback(async () => {
+    const currentMode = usePlaybackStore.getState().aspectRatio;
     const modes: AspectRatioMode[] = ['fit', 'fill', 'stretch', '16:9', '4:3', 'original'];
-    const currentIndex = modes.indexOf(aspectRatio);
+    const currentIndex = modes.indexOf(currentMode);
     const nextMode = modes[(currentIndex + 1) % modes.length];
-    await setAspectRatio(nextMode);
-  }, [aspectRatio, setAspectRatio]);
+    await usePlaybackStore.getState().setAspectRatio(nextMode);
+  }, []);
 
   const handleTogglePlay = useCallback(() => {
-    togglePlay();
-  }, [togglePlay]);
+    usePlaybackStore.getState().togglePlay();
+  }, []);
 
   const handleSeek = useCallback((pos: number) => {
-    seekTo(pos);
-  }, [seekTo]);
+    usePlaybackStore.getState().seekTo(pos);
+  }, []);
 
   const handleScrubbingStart = useCallback(() => {
-    startScrubbing();
-  }, [startScrubbing]);
+    usePlaybackStore.getState().startScrubbing();
+  }, []);
 
   const handleScrubbingMove = useCallback((pos: number) => {
-    moveScrubbing(pos);
-  }, [moveScrubbing]);
+    usePlaybackStore.getState().moveScrubbing(pos);
+  }, []);
 
   const handleScrubbingEnd = useCallback((pos?: number) => {
-    endScrubbing(typeof pos === 'number' ? pos : currentTimeMs);
-  }, [endScrubbing, currentTimeMs]);
+    const finalPos = typeof pos === 'number' ? pos : usePlaybackStore.getState().currentTimeMs;
+    usePlaybackStore.getState().endScrubbing(finalPos);
+  }, []);
 
   const handleSkipBack = useCallback(() => {
     skipBy(-skipSeconds);
@@ -367,32 +366,32 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ navigation, route })
   }, [skipBy, skipSeconds]);
 
   const handlePrevious = useCallback(() => {
-    playPrevious();
-  }, [playPrevious]);
+    usePlaybackStore.getState().playPrevious();
+  }, []);
 
   const handleNext = useCallback(() => {
-    playNext();
-  }, [playNext]);
+    usePlaybackStore.getState().playNext();
+  }, []);
 
   const handleToggleLock = useCallback(() => {
-    toggleLock();
-  }, [toggleLock]);
+    usePlaybackStore.getState().toggleLock();
+  }, []);
 
   const handleDismissControls = useCallback(() => {
-    hideControls();
-  }, [hideControls]);
+    usePlaybackStore.getState().hideControls();
+  }, []);
 
   const handleSingleTap = useCallback(() => {
-    toggleControls();
-  }, [toggleControls]);
+    usePlaybackStore.getState().toggleControls();
+  }, []);
 
   const handleBrightnessChange = useCallback((newBrightness: number) => {
-    setBrightness(newBrightness);
-  }, [setBrightness]);
+    usePlaybackStore.getState().setBrightness(newBrightness);
+  }, []);
 
   const handleVolumeChange = useCallback((newVolume: number) => {
-    setVolume(newVolume);
-  }, [setVolume]);
+    usePlaybackStore.getState().setVolume(newVolume);
+  }, []);
 
   const handleOpenTracksSheet = useCallback(() => {
     setTracksSheetVisible(true);
@@ -416,7 +415,7 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ navigation, route })
             player={nativePlayer}
             style={styles.fullSurface}
             contentFit={aspectRatio === 'fill' ? 'cover' : aspectRatio === 'stretch' ? 'fill' : 'contain'}
-            surfaceType={Platform.OS === 'android' ? 'textureView' : undefined}
+            surfaceType={Platform.OS === 'android' ? 'surfaceView' : undefined}
             nativeControls={false}
             allowsPictureInPicture={true}
           />
@@ -439,7 +438,6 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ navigation, route })
       {/* Subtitle Rendering Overlay */}
       <SubtitleOverlay
         cues={subtitleCues}
-        currentTimeMs={currentTimeMs}
         subtitleDelayMs={subtitleDelayMs}
         fontSize={settings.subtitleFontSize}
         textColor={settings.subtitleTextColor}
@@ -471,15 +469,10 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ navigation, route })
           visible={areControlsVisible}
           state={state}
           title={currentMedia?.displayName || 'Playing Video'}
-          currentTimeMs={currentTimeMs}
-          durationMs={durationMs}
-          bufferedMs={bufferedMs}
           playbackRate={playbackRate}
           aspectRatio={aspectRatio}
           orientationMode={orientationMode}
           isLandscape={isLandscape}
-          isScrubbing={isScrubbing}
-          scrubPositionMs={scrubPositionMs}
           skipSeconds={skipSeconds}
           onToggleOrientation={handleToggleOrientation}
           onDismissControls={handleDismissControls}
@@ -493,8 +486,8 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ navigation, route })
           onSkipForward={handleSkipForward}
           onPrevious={handlePrevious}
           onNext={handleNext}
-          hasPrevious={currentTimeMs > 0 || queueIndex > 0}
-          hasNext={queueIndex >= 0 && queueIndex + 1 < queue.length}
+          hasPrevious={hasPrevious}
+          hasNext={hasNext}
           onToggleLock={handleToggleLock}
           onOpenTracksSheet={handleOpenTracksSheet}
           onCycleSpeed={handleCycleSpeed}

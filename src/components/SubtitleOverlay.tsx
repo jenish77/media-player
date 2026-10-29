@@ -3,10 +3,11 @@ import { View, Text, StyleSheet } from 'react-native';
 import { SubtitleCue } from '../types/player';
 import { getActiveCue } from '../utils/subtitleParser';
 import { palette } from '../theme/colors';
+import { usePlaybackStore } from '../store/usePlaybackStore';
 
 interface SubtitleOverlayProps {
   cues: SubtitleCue[];
-  currentTimeMs: number;
+  currentTimeMs?: number;
   subtitleDelayMs?: number;
   fontSize?: number;
   textColor?: string;
@@ -21,9 +22,13 @@ const SubtitleOverlayComponent: React.FC<SubtitleOverlayProps> = ({
   textColor = palette.white,
   backgroundColor = 'rgba(0, 0, 0, 0.75)',
 }) => {
+  const storeTimeMs = usePlaybackStore((s) => (cues && cues.length > 0 && currentTimeMs === undefined ? s.currentTimeMs : 0));
+  const effectiveTimeMs = typeof currentTimeMs === 'number' ? currentTimeMs : storeTimeMs;
+
   const activeCue = useMemo(() => {
-    return getActiveCue(cues, currentTimeMs, subtitleDelayMs);
-  }, [cues, currentTimeMs, subtitleDelayMs]);
+    if (!cues || cues.length === 0) return null;
+    return getActiveCue(cues, effectiveTimeMs, subtitleDelayMs);
+  }, [cues, effectiveTimeMs, subtitleDelayMs]);
 
   if (!activeCue || !activeCue.text) {
     return null;

@@ -7,6 +7,8 @@ import {
   SubtitleTrack,
   SubtitleCue,
   PlayerError,
+  PendingSeek,
+  SeekDiagnosticEvent,
 } from '../types/player';
 import { getDefaultPlayerAdapter, IPlayerAdapter } from '../native/player/PlayerAdapter';
 import { playbackPersistence } from '../services/playbackPersistence';
@@ -42,6 +44,8 @@ interface PlaybackState {
   nativePlayer: any;
   isScrubbing: boolean;
   scrubPositionMs: number;
+  isSeeking: boolean;
+  previewPositionMs: number | null;
   orientationMode: 'auto' | 'portrait' | 'landscape';
   queue: MediaItem[];
   queueIndex: number;
@@ -78,18 +82,291 @@ interface PlaybackState {
   setQueue: (items: MediaItem[], startIndex?: number) => void;
   playNext: () => Promise<void>;
   playPrevious: () => Promise<void>;
+  getLastSeekDiagnostic: () => SeekDiagnosticEvent | null;
+  getActiveSeek: () => PendingSeek | null;
 }
 
 let activeAdapter: IPlayerAdapter = getDefaultPlayerAdapter();
 let unsubscribeEvents: (() => void)[] = [];
+let activeSeekSession = 0;
+let seekRequestIdCounter = 0;
 let authoritativeSeekTargetMs: number | null = null;
+let activeSeek: PendingSeek | null = null;
+let lastSeekDiagnostic: SeekDiagnosticEvent | null = null;
 let seekDispatchTimer: ReturnType<typeof setTimeout> | null = null;
-let seekReconciliationTimer: ReturnType<typeof setTimeout> | null = null;
+let seekWatchdogTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingSeekResolvers: Array<() => void> = [];
-let wasPlayingBeforeSeek: boolean | null = null;
+let seekPlaybackIntent: boolean | null = null;
 let wasPlayingBeforeScrub: boolean | null = null;
 let isTogglingPlay = false;
 let isSwitchingMedia = false;
+
+const clearPendingSeekTimers = () => {
+  if (seekDispatchTimer) {
+    clearTimeout(seekDispatchTimer);
+    seekDispatchTimer = null;
+  }
+  if (seekWatchdogTimer) {
+    clearTimeout(seekWatchdogTimer);
+    seekWatchdogTimer = null;
+  }
+  activeSeek = null;
+  const resolvers = [...pendingSeekResolvers];
+  pendingSeekResolvers = [];
+  resolvers.forEach((r) => r());
+};
+
+const finalizeSeek = (
+  sessionId: number,
+  requestId: number,
+  actualPositionMs: number,
+  shouldResume: boolean,
+  set: (partial: Partial<PlaybackState> | ((state: PlaybackState) => Partial<PlaybackState>)) => void,
+  get: () => PlaybackState,
+  options?: { isTimeout?: boolean; isError?: boolean }
+) => {
+  if (activeSeekSession !== sessionId || (activeSeek && activeSeek.requestId !== requestId)) {
+    return; // Stale session or request, ignore
+  }
+  if (seekWatchdogTimer) {
+    clearTimeout(seekWatchdogTimer);
+    seekWatchdogTimer = null;
+  }
+
+  const completedAt = Date.now();
+  const targetMs = authoritativeSeekTargetMs ?? (activeSeek?.targetPositionMs ?? actualPositionMs);
+  const posDiff = Math.abs(actualPositionMs - targetMs);
+  const reachedTarget =
+    posDiff <= 1500 ||
+    (targetMs === 0 && actualPositionMs <= 1000) ||
+    (get().durationMs > 0 && targetMs >= get().durationMs - 500 && actualPositionMs >= get().durationMs - 1000);
+
+  const isFailedOrTimeout = options?.isError || (options?.isTimeout && !reachedTarget);
+
+  if (lastSeekDiagnostic && lastSeekDiagnostic.requestId === requestId) {
+    lastSeekDiagnostic.nativeSeekCompletedAt = completedAt;
+    lastSeekDiagnostic.actualPositionAfterSeekMs = actualPositionMs;
+    lastSeekDiagnostic.firstFrameAfterSeekAt = null; // Do NOT fabricate
+    lastSeekDiagnostic.seekCompleted = !isFailedOrTimeout;
+    lastSeekDiagnostic.playbackState = shouldResume ? 'playing' : 'paused';
+    lastSeekDiagnostic.status = isFailedOrTimeout
+      ? options?.isError
+        ? 'failed'
+        : 'timedOut'
+      : 'acknowledged';
+    if (options?.isTimeout) {
+      lastSeekDiagnostic.watchdogTriggered = true;
+    }
+  }
+
+  activeSeek = null;
+  authoritativeSeekTargetMs = null;
+  seekPlaybackIntent = null;
+
+  if (isFailedOrTimeout) {
+    // Seek timed out or failed without reaching target!
+    // Clear preview/seeking, keep currentTimeMs at actual native position where player actually stayed
+    set({
+      isSeeking: false,
+      previewPositionMs: null,
+      currentTimeMs: actualPositionMs,
+      scrubPositionMs: actualPositionMs,
+    });
+    return;
+  }
+
+  const currentState = get().state;
+  if (shouldResume && currentState !== 'completed') {
+    activeAdapter.play().catch(() => {});
+    set({
+      isSeeking: false,
+      previewPositionMs: null,
+      currentTimeMs: actualPositionMs,
+      scrubPositionMs: actualPositionMs,
+      state: 'playing',
+    });
+  } else {
+    if (currentState !== 'completed') {
+      activeAdapter.pause().catch(() => {});
+      set({
+        isSeeking: false,
+        previewPositionMs: null,
+        currentTimeMs: actualPositionMs,
+        scrubPositionMs: actualPositionMs,
+        state: 'paused',
+      });
+    } else {
+      set({
+        isSeeking: false,
+        previewPositionMs: null,
+        currentTimeMs: actualPositionMs,
+        scrubPositionMs: actualPositionMs,
+      });
+    }
+  }
+
+  const media = get().currentMedia;
+  if (media && actualPositionMs > 0) {
+    playbackPersistence.recordProgress(media.id, actualPositionMs);
+  }
+};
+
+const executeCentralSeek = async (
+  targetMs: number,
+  resumeIfPlaying: boolean | undefined,
+  set: (partial: Partial<PlaybackState> | ((state: PlaybackState) => Partial<PlaybackState>)) => void,
+  get: () => PlaybackState,
+  immediate: boolean = false
+): Promise<void> => {
+  const duration = get().durationMs;
+  const clampedTarget = duration > 0 ? clamp(targetMs, 0, duration) : Math.max(0, targetMs);
+
+  const isPlayingNow =
+    get().state === 'playing' ||
+    (typeof activeAdapter.isPlaying === 'function' ? activeAdapter.isPlaying() : false);
+  const shouldResume =
+    typeof resumeIfPlaying === 'boolean'
+      ? resumeIfPlaying
+      : seekPlaybackIntent !== null
+      ? seekPlaybackIntent
+      : isPlayingNow;
+
+  seekPlaybackIntent = shouldResume;
+  authoritativeSeekTargetMs = clampedTarget;
+
+  const previousPositionMs = get().currentTimeMs;
+  const diff = clampedTarget - previousPositionMs;
+  let direction: 'forward' | 'backward' | 'stationary' = 'stationary';
+  if (diff > 50) direction = 'forward';
+  else if (diff < -50) direction = 'backward';
+
+  const requestId = ++seekRequestIdCounter;
+  const sessionId = ++activeSeekSession;
+
+  activeSeek = {
+    requestId,
+    sessionId,
+    targetPositionMs: clampedTarget,
+    previousPositionMs,
+    direction,
+    wasPlaying: shouldResume,
+    requestedAt: Date.now(),
+    status: 'pending',
+  };
+
+  lastSeekDiagnostic = {
+    requestId,
+    sessionId,
+    mediaId: get().currentMedia?.id || null,
+    requestedPositionMs: targetMs,
+    safeTargetPositionMs: clampedTarget,
+    previousNativePositionMs: previousPositionMs,
+    seekDirection: direction,
+    wasPlayingBeforeSeek: shouldResume,
+    seekRequestedAt: activeSeek.requestedAt,
+    nativeSeekCompletedAt: null,
+    actualPositionAfterSeekMs: null,
+    firstFrameAfterSeekAt: null,
+    isBuffering: get().state === 'buffering',
+    playbackState: get().state,
+    watchdogTriggered: false,
+    seekCompleted: false,
+    status: 'pending',
+  };
+
+  // Revive from completed state if seeking before duration
+  const isCompleted = get().state === 'completed';
+  const revivedState =
+    isCompleted && clampedTarget < duration ? (shouldResume ? 'playing' : 'paused') : undefined;
+
+  // Immediate optimistic UI preview feedback (0ms delay) - never overwrite currentTimeMs during seek
+  set({
+    isSeeking: true,
+    previewPositionMs: clampedTarget,
+    scrubPositionMs: clampedTarget,
+    ...(revivedState ? { state: revivedState } : {}),
+  });
+
+  const media = get().currentMedia;
+  if (media) {
+    playbackPersistence.recordProgress(media.id, clampedTarget);
+  }
+
+  // Clear any existing debounce timer
+  if (seekDispatchTimer) {
+    clearTimeout(seekDispatchTimer);
+    seekDispatchTimer = null;
+  }
+
+  const dispatchNative = async () => {
+    const targetToExecute = authoritativeSeekTargetMs;
+    const resumeToExecute = seekPlaybackIntent ?? shouldResume;
+    if (targetToExecute === null) {
+      const resolvers = [...pendingSeekResolvers];
+      pendingSeekResolvers = [];
+      resolvers.forEach((r) => r());
+      return;
+    }
+
+    // 1200ms watchdog timer: guarantees recovery if native events fail or are omitted
+    if (seekWatchdogTimer) {
+      clearTimeout(seekWatchdogTimer);
+    }
+    seekWatchdogTimer = setTimeout(() => {
+      if (
+        activeSeek &&
+        activeSeek.requestId === requestId &&
+        activeSeek.sessionId === sessionId &&
+        get().isSeeking
+      ) {
+        console.log(
+          `[PlaybackStore] Seek watchdog timeout fired at 1200ms for req ${requestId}, sess ${sessionId}, target=${targetToExecute}ms`
+        );
+        const currentAdapterPos =
+          typeof (activeAdapter as any).getProgress === 'function'
+            ? (activeAdapter as any).getProgress().currentTimeMs
+            : get().currentTimeMs;
+        const currentResume = seekPlaybackIntent ?? activeSeek.wasPlaying;
+        finalizeSeek(sessionId, requestId, currentAdapterPos, currentResume, set, get, { isTimeout: true });
+      }
+    }, 1200);
+
+    try {
+      await activeAdapter.seekTo(targetToExecute, resumeToExecute);
+      const currentAdapterPos =
+        typeof (activeAdapter as any).getProgress === 'function'
+          ? (activeAdapter as any).getProgress().currentTimeMs
+          : get().currentTimeMs;
+      const currentResume = seekPlaybackIntent ?? activeSeek?.wasPlaying ?? shouldResume;
+      if (
+        activeSeek &&
+        activeSeek.requestId === requestId &&
+        Math.abs(currentAdapterPos - targetToExecute) <= 1500 &&
+        get().isSeeking
+      ) {
+        finalizeSeek(sessionId, requestId, currentAdapterPos, currentResume, set, get);
+      }
+    } catch (err) {
+      console.warn('[PlaybackStore] native seekTo error:', err);
+    } finally {
+      const resolvers = [...pendingSeekResolvers];
+      pendingSeekResolvers = [];
+      resolvers.forEach((r) => r());
+    }
+  };
+
+  if (immediate) {
+    return dispatchNative();
+  }
+
+  return new Promise<void>((resolve) => {
+    pendingSeekResolvers.push(resolve);
+    seekDispatchTimer = setTimeout(() => {
+      seekDispatchTimer = null;
+      dispatchNative();
+    }, 35);
+  });
+};
 
 export const usePlaybackStore = create<PlaybackState>((set, get) => ({
   state: 'idle',
@@ -115,6 +392,8 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
   nativePlayer: null,
   isScrubbing: false,
   scrubPositionMs: 0,
+  isSeeking: false,
+  previewPositionMs: null,
   orientationMode: 'auto',
   queue: [],
   queueIndex: -1,
@@ -133,13 +412,39 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
     unsubscribeEvents = [];
 
     const unSubState = activeAdapter.addListener('stateChange', ({ currentState }) => {
+      const prevState = get().state;
+      // If native player transitions to ready or playing while seek is pending, verify position before finalizing
+      if ((currentState === 'ready' || currentState === 'playing') && activeSeek !== null) {
+        const currentPos = activeAdapter.getProgress().currentTimeMs;
+        const target = activeSeek.targetPositionMs;
+        const diff = Math.abs(currentPos - target);
+        if (diff <= 1500 || (target === 0 && currentPos <= 1000)) {
+          finalizeSeek(
+            activeSeek.sessionId,
+            activeSeek.requestId,
+            currentPos,
+            seekPlaybackIntent ?? (currentState === 'playing'),
+            set,
+            get
+          );
+        }
+      }
       set({ state: currentState });
-      if (currentState === 'playing') {
+      if (
+        currentState === 'playing' &&
+        prevState !== 'playing' &&
+        authoritativeSeekTargetMs === null &&
+        !get().isSeeking
+      ) {
         get().showControlsTemporarily();
       }
     });
 
     const unSubProg = activeAdapter.addListener('progress', (progress: PlaybackProgress) => {
+      if (!get().currentMedia || get().state === 'idle') {
+        return;
+      }
+
       // 1. While user is actively dragging the scrubber slider, never overwrite finger position
       if (get().isScrubbing) {
         set({
@@ -149,22 +454,73 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
         return;
       }
 
-      // 2. While a seek is pending or reconciling, ignore stale pre-seek time updates
-      if (authoritativeSeekTargetMs !== null) {
-        const diff = Math.abs(progress.currentTimeMs - authoritativeSeekTargetMs);
-        if (diff < 750) {
-          // Native player has caught up to the seek target
-          authoritativeSeekTargetMs = null;
-          if (seekReconciliationTimer) {
-            clearTimeout(seekReconciliationTimer);
-            seekReconciliationTimer = null;
+      // 2. While a seek is pending, check direction-aware acknowledgment
+      if (activeSeek !== null && authoritativeSeekTargetMs !== null) {
+        const currentMs = progress.currentTimeMs;
+        const targetMs = activeSeek.targetPositionMs;
+        const previousMs = activeSeek.previousPositionMs;
+        const direction = activeSeek.direction;
+        const durationMs = progress.durationMs;
+
+        let isAcknowledged = false;
+        let isStale = false;
+
+        if (direction === 'backward') {
+          // Target is less than previous (T < P)
+          // Any update still at or above previousPositionMs (or > target + 1200) is stale pre-seek
+          if (currentMs > targetMs + 1200) {
+            isStale = true;
+          } else if (Math.abs(currentMs - targetMs) <= 1200) {
+            isAcknowledged = true;
+          } else if (
+            activeSeek.wasPlaying &&
+            currentMs >= targetMs - 500 &&
+            currentMs <= targetMs + 2500 &&
+            currentMs < previousMs - 500
+          ) {
+            // Jumped backward below previous position and advancing from target
+            isAcknowledged = true;
+          } else if (targetMs === 0 && currentMs <= 1000) {
+            isAcknowledged = true;
+          }
+        } else if (direction === 'forward') {
+          // Target is greater than previous (T > P)
+          // Any update still near or below previousPositionMs when target is significantly ahead is stale pre-seek
+          if (targetMs > previousMs + 1000 && currentMs < previousMs + 500) {
+            isStale = true;
+          } else if (Math.abs(currentMs - targetMs) <= 1200) {
+            isAcknowledged = true;
+          } else if (
+            activeSeek.wasPlaying &&
+            currentMs >= targetMs - 1200 &&
+            currentMs <= targetMs + 3000
+          ) {
+            isAcknowledged = true;
+          } else if (durationMs > 0 && targetMs >= durationMs - 500 && currentMs >= durationMs - 1000) {
+            isAcknowledged = true;
           }
         } else {
+          // Stationary (T ≈ P)
+          if (Math.abs(currentMs - targetMs) <= 1200) {
+            isAcknowledged = true;
+          }
+        }
+
+        if (isStale && !isAcknowledged) {
           // Reject stale pre-seek time updates so UI never jumps backward
           set({
             durationMs: progress.durationMs,
             bufferedMs: Math.max(progress.bufferedPositionMs, get().currentTimeMs),
           });
+          return;
+        }
+
+        if (isAcknowledged) {
+          const session = activeSeek.sessionId;
+          const reqId = activeSeek.requestId;
+          const resume = seekPlaybackIntent ?? activeSeek.wasPlaying;
+          finalizeSeek(session, reqId, currentMs, resume, set, get);
+        } else {
           return;
         }
       }
@@ -198,7 +554,16 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
     });
 
     const unSubComp = activeAdapter.addListener('completed', () => {
-      set({ state: 'completed', areControlsVisible: true });
+      clearPendingSeekTimers();
+      authoritativeSeekTargetMs = null;
+      seekPlaybackIntent = null;
+      set({
+        state: 'completed',
+        isSeeking: false,
+        isScrubbing: false,
+        previewPositionMs: null,
+        areControlsVisible: true,
+      });
       const media = get().currentMedia;
       if (media) {
         playbackPersistence.saveImmediate(media.id, 0); // Reset position on completion
@@ -212,17 +577,11 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
     get().init();
     playbackPersistence.setActiveMedia(media.id);
 
-    // Cancel pending seek timers from prior sessions
-    if (seekDispatchTimer) {
-      clearTimeout(seekDispatchTimer);
-      seekDispatchTimer = null;
-    }
-    if (seekReconciliationTimer) {
-      clearTimeout(seekReconciliationTimer);
-      seekReconciliationTimer = null;
-    }
+    // Cancel pending seek timers and increment session to invalidate prior in-flight seeks
+    activeSeekSession++;
+    clearPendingSeekTimers();
     authoritativeSeekTargetMs = null;
-    wasPlayingBeforeSeek = null;
+    seekPlaybackIntent = null;
     wasPlayingBeforeScrub = null;
 
     // Validate media file
@@ -259,6 +618,9 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
       error: null,
       areControlsVisible: true,
       subtitleCues: [],
+      isSeeking: false,
+      isScrubbing: false,
+      previewPositionMs: null,
     });
 
     try {
@@ -289,6 +651,10 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
     if (get().state === 'completed') {
       await get().seekTo(0, true);
     }
+    seekPlaybackIntent = true;
+    if (activeSeek) {
+      activeSeek.wasPlaying = true;
+    }
     await activeAdapter.play();
     get().showControlsTemporarily(4000);
   },
@@ -297,6 +663,13 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
     if (get().isLocked) return;
     const timer = get().autoHideTimer;
     if (timer) clearTimeout(timer);
+
+    // Reconcile playback intent if paused while seek is pending
+    seekPlaybackIntent = false;
+    if (activeSeek) {
+      activeSeek.wasPlaying = false;
+    }
+
     await activeAdapter.pause();
     const media = get().currentMedia;
     if (media) {
@@ -310,6 +683,24 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
     if (isTogglingPlay) return;
     isTogglingPlay = true;
     try {
+      if (get().isSeeking) {
+        // User toggled play while seek was in-flight
+        const currentIntent = seekPlaybackIntent ?? (get().state === 'playing');
+        const newIntent = !currentIntent;
+        seekPlaybackIntent = newIntent;
+        if (activeSeek) {
+          activeSeek.wasPlaying = newIntent;
+        }
+        if (!newIntent) {
+          await activeAdapter.pause();
+          set({ state: 'paused' });
+        } else {
+          await activeAdapter.play();
+          set({ state: 'playing' });
+        }
+        return;
+      }
+
       const isCurrentlyPlaying = activeAdapter.isPlaying
         ? activeAdapter.isPlaying()
         : get().state === 'playing';
@@ -330,139 +721,50 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
 
   seekTo: async (positionMs: number, resumeIfPlaying?: boolean) => {
     if (get().isLocked) return;
-    if (seekDispatchTimer) {
-      clearTimeout(seekDispatchTimer);
-      seekDispatchTimer = null;
-    }
-    if (seekReconciliationTimer) {
-      clearTimeout(seekReconciliationTimer);
-      seekReconciliationTimer = null;
-    }
-
-    const duration = get().durationMs;
-    const clamped = duration > 0 ? clamp(positionMs, 0, duration) : Math.max(0, positionMs);
-    const wasPlaying =
-      typeof resumeIfPlaying === 'boolean'
-        ? resumeIfPlaying
-        : wasPlayingBeforeSeek ?? (activeAdapter.isPlaying ? activeAdapter.isPlaying() : get().state === 'playing');
-
-    wasPlayingBeforeSeek = null;
-    authoritativeSeekTargetMs = clamped;
-
-    // Immediate optimistic UI update (0ms delay)
-    set({ currentTimeMs: clamped, scrubPositionMs: clamped });
-
-    try {
-      await activeAdapter.seekTo(clamped, wasPlaying);
-    } catch (err) {
-      console.warn('seekTo error:', err);
-    } finally {
-      // Reconcile seek target window: after 400ms, unlock authoritative position
-      seekReconciliationTimer = setTimeout(() => {
-        if (authoritativeSeekTargetMs === clamped) {
-          authoritativeSeekTargetMs = null;
-        }
-      }, 400);
-    }
-
-    const media = get().currentMedia;
-    if (media) {
-      playbackPersistence.recordProgress(media.id, clamped);
-    }
+    await executeCentralSeek(positionMs, resumeIfPlaying, set, get, true);
   },
 
   skipBy: async (seconds: number) => {
     if (get().isLocked) return;
-    const duration = get().durationMs;
-    const isPlayingNow = activeAdapter.isPlaying
-      ? activeAdapter.isPlaying()
-      : get().state === 'playing';
-
-    if (wasPlayingBeforeSeek === null) {
-      wasPlayingBeforeSeek = isPlayingNow;
-    }
-
     // Authoritative accumulation:
-    // If rapid taps occur while a seek is pending, accumulate from latest intended target!
+    // If rapid taps occur while a seek is pending or scrubbing, accumulate from latest intended target!
     const basePosition =
-      authoritativeSeekTargetMs !== null ? authoritativeSeekTargetMs : get().currentTimeMs;
+      authoritativeSeekTargetMs !== null
+        ? authoritativeSeekTargetMs
+        : (get().previewPositionMs ?? get().currentTimeMs);
 
-    const rawTarget = basePosition + seconds * 1000;
-    const clampedTarget = duration > 0 ? clamp(rawTarget, 0, duration) : Math.max(0, rawTarget);
-
-    authoritativeSeekTargetMs = clampedTarget;
-
-    // Immediate optimistic UI feedback (0ms delay)
-    set({ currentTimeMs: clampedTarget, scrubPositionMs: clampedTarget });
-    get().showControlsTemporarily();
-
-    const media = get().currentMedia;
-    if (media) {
-      playbackPersistence.recordProgress(media.id, clampedTarget);
-    }
-
-    // Throttled native seek dispatch with latest-target strategy (debounced by 35ms)
-    if (seekDispatchTimer) {
-      clearTimeout(seekDispatchTimer);
-      seekDispatchTimer = null;
-    }
-
-    return new Promise<void>((resolve) => {
-      pendingSeekResolvers.push(resolve);
-      seekDispatchTimer = setTimeout(async () => {
-        seekDispatchTimer = null;
-        const resolvers = [...pendingSeekResolvers];
-        pendingSeekResolvers = [];
-
-        const targetToExecute = authoritativeSeekTargetMs;
-        if (targetToExecute === null) {
-          resolvers.forEach((r) => r());
-          return;
-        }
-
-        const shouldResume = wasPlayingBeforeSeek ?? isPlayingNow;
-        wasPlayingBeforeSeek = null;
-
-        try {
-          await activeAdapter.seekTo(targetToExecute, shouldResume);
-        } catch (err) {
-          console.warn('Native seek dispatch error:', err);
-        } finally {
-          if (seekReconciliationTimer) {
-            clearTimeout(seekReconciliationTimer);
-          }
-          seekReconciliationTimer = setTimeout(() => {
-            if (authoritativeSeekTargetMs === targetToExecute) {
-              authoritativeSeekTargetMs = null;
-            }
-          }, 400);
-          resolvers.forEach((r) => r());
-        }
-      }, 35);
-    });
+    const targetMs = basePosition + seconds * 1000;
+    get().showControlsTemporarily(4000);
+    await executeCentralSeek(targetMs, undefined, set, get, false);
   },
 
   startScrubbing: () => {
     if (get().isLocked) return;
-    if (seekDispatchTimer) {
-      clearTimeout(seekDispatchTimer);
-      seekDispatchTimer = null;
-      const resolvers = [...pendingSeekResolvers];
-      pendingSeekResolvers = [];
-      resolvers.forEach((r) => r());
-    }
+    // Cancel pending seek timers and clear authoritative target so scrubber takes priority
+    clearPendingSeekTimers();
+    authoritativeSeekTargetMs = null;
     wasPlayingBeforeScrub =
       get().state === 'playing' || (activeAdapter.isPlaying ? activeAdapter.isPlaying() : false);
     const timer = get().autoHideTimer;
     if (timer) clearTimeout(timer);
-    set({ isScrubbing: true, scrubPositionMs: get().currentTimeMs, areControlsVisible: true, autoHideTimer: null });
+    set({
+      isScrubbing: true,
+      scrubPositionMs: get().currentTimeMs,
+      previewPositionMs: get().currentTimeMs,
+      areControlsVisible: true,
+      autoHideTimer: null,
+    });
   },
 
   moveScrubbing: (positionMs: number) => {
     if (get().isLocked) return;
     const duration = get().durationMs;
     const clamped = duration > 0 ? clamp(positionMs, 0, duration) : Math.max(0, positionMs);
-    set({ scrubPositionMs: clamped, currentTimeMs: clamped, areControlsVisible: true });
+    set({
+      scrubPositionMs: clamped,
+      previewPositionMs: clamped,
+      areControlsVisible: true,
+    });
   },
 
   endScrubbing: async (positionMs: number) => {
@@ -470,14 +772,12 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
     if (!get().isScrubbing) {
       return;
     }
-    const duration = get().durationMs;
-    const clamped = duration > 0 ? clamp(positionMs, 0, duration) : Math.max(0, positionMs);
     const shouldResume =
       wasPlayingBeforeScrub ??
       (get().state === 'playing' || (activeAdapter.isPlaying ? activeAdapter.isPlaying() : false));
     wasPlayingBeforeScrub = null;
-    set({ isScrubbing: false, currentTimeMs: clamped, scrubPositionMs: clamped });
-    await get().seekTo(clamped, shouldResume);
+    set({ isScrubbing: false });
+    await get().seekTo(positionMs, shouldResume);
     if (shouldResume) {
       get().showControlsTemporarily(4000);
     } else {
@@ -653,16 +953,10 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
         await activeAdapter.pause();
       } catch (_) {}
 
-      if (seekDispatchTimer) {
-        clearTimeout(seekDispatchTimer);
-        seekDispatchTimer = null;
-      }
-      if (seekReconciliationTimer) {
-        clearTimeout(seekReconciliationTimer);
-        seekReconciliationTimer = null;
-      }
+      activeSeekSession++;
+      clearPendingSeekTimers();
       authoritativeSeekTargetMs = null;
-      wasPlayingBeforeSeek = null;
+      seekPlaybackIntent = null;
       wasPlayingBeforeScrub = null;
 
       await get().loadMedia(nextMedia, true);
@@ -701,16 +995,10 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
         await activeAdapter.pause();
       } catch (_) {}
 
-      if (seekDispatchTimer) {
-        clearTimeout(seekDispatchTimer);
-        seekDispatchTimer = null;
-      }
-      if (seekReconciliationTimer) {
-        clearTimeout(seekReconciliationTimer);
-        seekReconciliationTimer = null;
-      }
+      activeSeekSession++;
+      clearPendingSeekTimers();
       authoritativeSeekTargetMs = null;
-      wasPlayingBeforeSeek = null;
+      seekPlaybackIntent = null;
       wasPlayingBeforeScrub = null;
 
       await get().loadMedia(prevMedia, true);
@@ -721,20 +1009,10 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
   },
 
   reset: async () => {
-    if (seekDispatchTimer) {
-      clearTimeout(seekDispatchTimer);
-      seekDispatchTimer = null;
-    }
-    const resolvers = [...pendingSeekResolvers];
-    pendingSeekResolvers = [];
-    resolvers.forEach((r) => r());
-
-    if (seekReconciliationTimer) {
-      clearTimeout(seekReconciliationTimer);
-      seekReconciliationTimer = null;
-    }
+    activeSeekSession++;
+    clearPendingSeekTimers();
     authoritativeSeekTargetMs = null;
-    wasPlayingBeforeSeek = null;
+    seekPlaybackIntent = null;
     wasPlayingBeforeScrub = null;
     isSwitchingMedia = false;
 
@@ -747,11 +1025,16 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
     }
     playbackPersistence.setActiveMedia(null);
 
-    // Stop native playback immediately and release
     try {
-      await activeAdapter.pause();
+      if (typeof activeAdapter.pause === 'function') {
+        await activeAdapter.pause();
+      }
     } catch (_) {}
-    await activeAdapter.dispose();
+    try {
+      if (typeof activeAdapter.dispose === 'function') {
+        await activeAdapter.dispose();
+      }
+    } catch (_) {}
 
     set({
       state: 'idle',
@@ -769,6 +1052,11 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
       subtitleCues: [],
       isScrubbing: false,
       scrubPositionMs: 0,
+      isSeeking: false,
+      previewPositionMs: null,
     });
   },
+
+  getLastSeekDiagnostic: () => lastSeekDiagnostic,
+  getActiveSeek: () => activeSeek,
 }));

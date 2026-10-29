@@ -52,6 +52,11 @@ const GestureOverlayComponent: React.FC<GestureOverlayProps> = ({
     'volume' | 'brightness' | 'skipLeft' | 'skipRight' | null
   >(null);
 
+  // Local HUD display state for instantaneous 60fps rendering without bridge lag
+  const [displayVolume, setDisplayVolume] = useState<number>(currentVolume);
+  const [displayBrightness, setDisplayBrightness] = useState<number>(currentBrightness);
+  const lastDispatchTimeRef = useRef<number>(0);
+
   // Fresh refs to prevent stale closure inside PanResponder
   const currentVolumeRef = useRef<number>(currentVolume);
   currentVolumeRef.current = currentVolume;
@@ -100,6 +105,18 @@ const GestureOverlayComponent: React.FC<GestureOverlayProps> = ({
   const touchStartYRef = useRef<number>(0);
   const touchStartXRef = useRef<number>(0);
   const isVerticalSwipeRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    if (!isVerticalSwipeRef.current) {
+      setDisplayVolume(currentVolume);
+    }
+  }, [currentVolume]);
+
+  useEffect(() => {
+    if (!isVerticalSwipeRef.current) {
+      setDisplayBrightness(currentBrightness);
+    }
+  }, [currentBrightness]);
 
   const setGestureType = (type: 'volume' | 'brightness' | 'skipLeft' | 'skipRight' | null) => {
     activeGestureTypeRef.current = type;
@@ -188,21 +205,36 @@ const GestureOverlayComponent: React.FC<GestureOverlayProps> = ({
         const sensitivity = Math.max(180, Math.min(300, screenHeight * 0.45));
         const deltaFraction = -gestureState.dy / sensitivity;
 
+        const now = Date.now();
         if (isLeftSide && swipeBrightnessEnabledRef.current && onBrightnessChangeRef.current) {
           setGestureType('brightness');
           const targetBrightness = Math.max(0, Math.min(1, initialBrightnessRef.current + deltaFraction));
           currentBrightnessRef.current = targetBrightness;
-          onBrightnessChangeRef.current(targetBrightness);
+          setDisplayBrightness(targetBrightness);
+          if (now - lastDispatchTimeRef.current >= 80) {
+            lastDispatchTimeRef.current = now;
+            onBrightnessChangeRef.current(targetBrightness);
+          }
         } else if (!isLeftSide && swipeVolumeEnabledRef.current && onVolumeChangeRef.current) {
           setGestureType('volume');
           const targetVolume = Math.max(0, Math.min(1, initialVolumeRef.current + deltaFraction));
           currentVolumeRef.current = targetVolume;
-          onVolumeChangeRef.current(targetVolume);
+          setDisplayVolume(targetVolume);
+          if (now - lastDispatchTimeRef.current >= 80) {
+            lastDispatchTimeRef.current = now;
+            onVolumeChangeRef.current(targetVolume);
+          }
         }
       },
       onPanResponderRelease: (evt) => {
         if (isVerticalSwipeRef.current) {
           isVerticalSwipeRef.current = false;
+          // Ensure final value is dispatched upon gesture release
+          if (activeGestureTypeRef.current === 'brightness') {
+            onBrightnessChangeRef.current?.(currentBrightnessRef.current);
+          } else if (activeGestureTypeRef.current === 'volume') {
+            onVolumeChangeRef.current?.(currentVolumeRef.current);
+          }
           if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
           hideTimerRef.current = setTimeout(() => {
             setGestureType(null);
@@ -313,9 +345,9 @@ const GestureOverlayComponent: React.FC<GestureOverlayProps> = ({
             testID="volume-gesture-hud"
           >
             <View style={styles.hudIconContainer}>
-              {currentVolume <= 0 ? (
+              {displayVolume <= 0 ? (
                 <VolumeX size={20} color={palette.slate400} />
-              ) : currentVolume < 0.5 ? (
+              ) : displayVolume < 0.5 ? (
                 <Volume1 size={20} color={palette.primary400} />
               ) : (
                 <Volume2 size={20} color={palette.primary400} />
@@ -328,15 +360,15 @@ const GestureOverlayComponent: React.FC<GestureOverlayProps> = ({
                 style={[
                   styles.progressBarFill,
                   {
-                    height: `${Math.round(currentVolume * 100)}%`,
-                    backgroundColor: currentVolume <= 0 ? palette.slate500 : palette.primary500,
+                    height: `${Math.round(displayVolume * 100)}%`,
+                    backgroundColor: displayVolume <= 0 ? palette.slate500 : palette.primary500,
                   },
                 ]}
               />
             </View>
 
             <Text style={styles.hudPercentageText}>
-              {Math.round(currentVolume * 100)}%
+              {Math.round(displayVolume * 100)}%
             </Text>
           </View>
         )}
@@ -361,7 +393,7 @@ const GestureOverlayComponent: React.FC<GestureOverlayProps> = ({
                 style={[
                   styles.progressBarFill,
                   {
-                    height: `${Math.round(currentBrightness * 100)}%`,
+                    height: `${Math.round(displayBrightness * 100)}%`,
                     backgroundColor: palette.accentCyan,
                   },
                 ]}
@@ -369,7 +401,7 @@ const GestureOverlayComponent: React.FC<GestureOverlayProps> = ({
             </View>
 
             <Text style={styles.hudPercentageText}>
-              {Math.round(currentBrightness * 100)}%
+              {Math.round(displayBrightness * 100)}%
             </Text>
           </View>
         )}

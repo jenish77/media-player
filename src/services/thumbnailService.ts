@@ -19,7 +19,7 @@ const memoryCache = new Map<string, any>();
 class ThumbnailQueue {
   private queue: Array<() => Promise<void>> = [];
   private activeCount = 0;
-  private readonly maxConcurrent = 3;
+  private readonly maxConcurrent = 1;
 
   add<T>(task: () => Promise<T>): Promise<T> {
     return new Promise((resolve, reject) => {
@@ -223,7 +223,7 @@ export async function getThumbnailForMedia(media: MediaItem): Promise<any> {
 /**
  * Pre-generates thumbnails for a slice of items in the background
  */
-export function preloadThumbnails(items: MediaItem[], limit = 16): void {
+export function preloadThumbnails(items: MediaItem[], limit = 8): void {
   if (!items || items.length === 0) return;
   const slice = items.slice(0, limit);
   slice.forEach((item) => {

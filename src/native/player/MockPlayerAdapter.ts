@@ -4,6 +4,7 @@ import {
   SubtitleStyle,
   AudioTrack,
   SubtitleTrack,
+  PlayerState,
 } from '../../types/player';
 import { AspectRatioMode } from '../../types/media';
 
@@ -89,19 +90,51 @@ export class MockPlayerAdapter extends BasePlayerAdapter {
   }
 
   private pendingSeekTargetMs: number | null = null;
+  private seekDelayMs: number = 0;
+  private staleEventConfig: { positionMs: number; count: number } | null = null;
+
+  setSeekDelay(ms: number): void {
+    this.seekDelayMs = ms;
+  }
+
+  setStaleEventOnSeek(positionMs: number, count: number = 1): void {
+    this.staleEventConfig = { positionMs, count };
+  }
+
+  simulateStateChange(newState: PlayerState): void {
+    this.setState(newState);
+  }
 
   async seekTo(positionMs: number, resumeIfPlaying?: boolean): Promise<void> {
     if (this.state === 'disposed') return;
     const wasPlaying = typeof resumeIfPlaying === 'boolean' ? resumeIfPlaying : this.isPlaying();
     const clamped = Math.max(0, Math.min(positionMs, this.simulatedDurationMs));
     this.pendingSeekTargetMs = null;
+
+    if (this.staleEventConfig && this.staleEventConfig.count > 0) {
+      for (let i = 0; i < this.staleEventConfig.count; i++) {
+        this.updateProgress(
+          this.staleEventConfig.positionMs,
+          this.simulatedDurationMs,
+          this.staleEventConfig.positionMs + 5000
+        );
+      }
+      this.staleEventConfig = null;
+    }
+
+    if (this.seekDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, this.seekDelayMs));
+    }
+    if (this.getState() === 'disposed') return;
+
     this.updateProgress(clamped, this.simulatedDurationMs, clamped + 10000);
 
+    const shouldResume = (wasPlaying || this.state === 'playing') && this.state !== 'paused';
     if (clamped >= this.simulatedDurationMs && this.simulatedDurationMs > 0) {
       this.stopPlaybackTimer();
       this.setState('completed');
       this.emit('completed', undefined as any);
-    } else if (wasPlaying) {
+    } else if (shouldResume) {
       this.setState('playing');
       this.startPlaybackTimer();
     } else {

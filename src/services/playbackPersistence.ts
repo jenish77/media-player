@@ -4,16 +4,20 @@ import { throttle } from '../utils/edgeCaseHandlers';
 class PlaybackPersistenceManager {
   private currentMediaId: string | null = null;
   private lastSavedPositionMs: number = 0;
+  private lastCommittedPositionMs: number = 0;
 
-  // Throttled database writer (at most once every 2500ms)
+  // Throttled database writer (at most once every 6000ms, and only if position meaningfully changed by >= 2000ms)
   private throttledSave = throttle(async (mediaId: string, positionMs: number) => {
     try {
-      await updatePlaybackPosition(mediaId, positionMs);
+      if (Math.abs(positionMs - this.lastCommittedPositionMs) >= 2000) {
+        await updatePlaybackPosition(mediaId, positionMs);
+        this.lastCommittedPositionMs = positionMs;
+      }
       this.lastSavedPositionMs = positionMs;
     } catch (err) {
       console.warn('Failed to save playback progress:', err);
     }
-  }, 2500);
+  }, 6000);
 
   setActiveMedia(mediaId: string | null): void {
     // Flush any pending progress before changing media
@@ -22,6 +26,7 @@ class PlaybackPersistenceManager {
     }
     this.currentMediaId = mediaId;
     this.lastSavedPositionMs = 0;
+    this.lastCommittedPositionMs = 0;
   }
 
   recordProgress(mediaId: string, positionMs: number): void {

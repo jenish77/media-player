@@ -8,6 +8,7 @@ module.exports = defineConfig([
     ignores: ['dist/*'],
     rules: {
       'react-hooks/refs': 'warn',
+      'react-hooks/immutability': 'warn',
     },
   },
 ]);

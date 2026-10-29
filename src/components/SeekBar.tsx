@@ -1,8 +1,15 @@
-import React, { useRef, useState } from 'react';
-import { View, StyleSheet, PanResponder, LayoutChangeEvent } from 'react-native';
+import React, { useRef, useEffect, useCallback, useMemo } from 'react';
+import { View, StyleSheet, LayoutChangeEvent } from 'react-native';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withTiming,
+  runOnJS,
+} from 'react-native-reanimated';
 import { palette } from '../theme/colors';
 
-interface SeekBarProps {
+export interface SeekBarProps {
   currentTimeMs: number;
   durationMs: number;
   bufferedMs?: number;
@@ -23,13 +30,12 @@ const SeekBarComponent: React.FC<SeekBarProps> = ({
   onScrubbingEnd,
   disabled = false,
 }) => {
-  const [layoutWidth, setLayoutWidth] = useState<number>(0);
-  const [isScrubbing, setIsScrubbing] = useState<boolean>(false);
-  const [scrubPositionMs, setScrubPositionMs] = useState<number>(0);
+  // Reanimated shared values driven on the UI thread with zero JS bridge lag
+  const trackWidth = useSharedValue<number>(0);
+  const progressFraction = useSharedValue<number>(0);
+  const isDragging = useSharedValue<boolean>(false);
 
-  const containerRef = useRef<any>(null);
-  const trackPageXRef = useRef<number>(0);
-  const layoutWidthRef = useRef<number>(0);
+  const isDraggingRef = useRef<boolean>(false);
   const lastMoveCallTimeRef = useRef<number>(0);
 
   const latestRef = useRef({
@@ -40,134 +46,152 @@ const SeekBarComponent: React.FC<SeekBarProps> = ({
     onScrubbingEnd,
     disabled,
   });
-  latestRef.current = {
-    durationMs,
-    onSeek,
-    onScrubbingStart,
-    onScrubbingMove,
-    onScrubbingEnd,
-    disabled,
-  };
 
-  const duration = Math.max(1, durationMs || 0);
-  const current = isScrubbing ? scrubPositionMs : currentTimeMs;
+  useEffect(() => {
+    latestRef.current = {
+      durationMs,
+      onSeek,
+      onScrubbingStart,
+      onScrubbingMove,
+      onScrubbingEnd,
+      disabled,
+    };
+  });
 
-  const progressPercent = durationMs > 0 ? Math.min(100, Math.max(0, (current / duration) * 100)) : 0;
-  const bufferPercent = durationMs > 0 ? Math.min(100, Math.max(0, (bufferedMs / duration) * 100)) : 0;
+  // Sync external progress to shared value when not actively dragging
+  useEffect(() => {
+    if (!isDraggingRef.current) {
+      const fraction = durationMs > 0 ? Math.min(1, Math.max(0, currentTimeMs / durationMs)) : 0;
+      progressFraction.value = fraction;
+    }
+  }, [currentTimeMs, durationMs]);
+
+  const handleDragStart = useCallback(() => {
+    isDraggingRef.current = true;
+    latestRef.current.onScrubbingStart?.();
+  }, []);
+
+  const handleDragMove = useCallback((fraction: number) => {
+    const dur = latestRef.current.durationMs;
+    const pos = Math.round(fraction * (dur > 0 ? dur : 0));
+    const now = Date.now();
+    // Throttle writes to JS/Zustand: at most once every 80ms while dragging (~12fps)
+    if (now - lastMoveCallTimeRef.current >= 80) {
+      lastMoveCallTimeRef.current = now;
+      latestRef.current.onScrubbingMove?.(pos);
+    }
+  }, []);
+
+  const handleDragEnd = useCallback((fraction: number) => {
+    isDraggingRef.current = false;
+    const dur = latestRef.current.durationMs;
+    const finalPos = Math.round(fraction * (dur > 0 ? dur : 0));
+    if (latestRef.current.onScrubbingEnd) {
+      latestRef.current.onScrubbingEnd(finalPos);
+    } else {
+      latestRef.current.onSeek(finalPos);
+    }
+  }, []);
+
+  const handleDragCancel = useCallback(() => {
+    if (isDraggingRef.current) {
+      isDraggingRef.current = false;
+      const dur = latestRef.current.durationMs;
+      const finalPos = Math.round(progressFraction.value * (dur > 0 ? dur : 0));
+      if (latestRef.current.onScrubbingEnd) {
+        latestRef.current.onScrubbingEnd(finalPos);
+      } else {
+        latestRef.current.onSeek(finalPos);
+      }
+    }
+  }, []);
 
   const handleLayout = (e: LayoutChangeEvent) => {
     const width = e.nativeEvent.layout.width;
-    setLayoutWidth(width);
-    layoutWidthRef.current = width;
-
-    // Measure element's absolute screen coordinates
-    if (containerRef.current?.measure) {
-      containerRef.current.measure(
-        (_x: number, _y: number, _w: number, _h: number, pageX: number) => {
-          if (typeof pageX === 'number' && !isNaN(pageX) && pageX >= 0) {
-            trackPageXRef.current = pageX;
-          }
-        }
-      );
+    if (width > 0) {
+      trackWidth.value = width;
     }
   };
 
-  const calculateSeekPosition = (pageX: number, fallbackLocationX?: number) => {
-    const width = layoutWidthRef.current || layoutWidth;
-    if (width <= 0) return 0;
+  const panGesture = useMemo(() => {
+    return Gesture.Pan()
+      .minDistance(0)
+      .onBegin((event) => {
+        'worklet';
+        isDragging.value = true;
+        const width = trackWidth.value;
+        if (width > 0) {
+          const fraction = Math.min(1, Math.max(0, event.x / width));
+          progressFraction.value = fraction;
+        }
+        runOnJS(handleDragStart)();
+      })
+      .onUpdate((event) => {
+        'worklet';
+        const width = trackWidth.value;
+        if (width > 0) {
+          const fraction = Math.min(1, Math.max(0, event.x / width));
+          progressFraction.value = fraction;
+          runOnJS(handleDragMove)(fraction);
+        }
+      })
+      .onEnd((event) => {
+        'worklet';
+        const width = trackWidth.value;
+        let fraction = progressFraction.value;
+        if (width > 0) {
+          fraction = Math.min(1, Math.max(0, event.x / width));
+          progressFraction.value = fraction;
+        }
+        isDragging.value = false;
+        runOnJS(handleDragEnd)(fraction);
+      })
+      .onFinalize(() => {
+        'worklet';
+        isDragging.value = false;
+        runOnJS(handleDragCancel)();
+      });
+  }, [handleDragCancel, handleDragEnd, handleDragMove, handleDragStart]);
 
-    let touchX: number;
-    if (trackPageXRef.current > 0) {
-      touchX = Math.max(0, Math.min(pageX - trackPageXRef.current, width));
-    } else if (typeof fallbackLocationX === 'number') {
-      touchX = Math.max(0, Math.min(fallbackLocationX, width));
-    } else {
-      touchX = 0;
-    }
+  // UI-thread animated styles
+  const animatedProgressStyle = useAnimatedStyle(() => {
+    return {
+      width: `${progressFraction.value * 100}%`,
+    };
+  });
 
-    const percent = touchX / width;
-    const dur = latestRef.current.durationMs;
-    return Math.round(percent * (dur > 0 ? dur : 0));
-  };
+  const animatedThumbStyle = useAnimatedStyle(() => {
+    return {
+      left: `${progressFraction.value * 100}%`,
+      transform: [
+        {
+          scale: withTiming(isDragging.value ? 1.35 : 1, { duration: 150 }),
+        },
+      ],
+    };
+  });
 
-  const [panResponder] = useState(() =>
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => !latestRef.current.disabled,
-      onMoveShouldSetPanResponder: () => !latestRef.current.disabled,
-      onPanResponderGrant: (evt) => {
-        setIsScrubbing(true);
-        // Refresh measurement in case of layout shifts
-        if (containerRef.current?.measure) {
-          containerRef.current.measure(
-            (_x: number, _y: number, _w: number, _h: number, pageX: number) => {
-              if (typeof pageX === 'number' && !isNaN(pageX) && pageX >= 0) {
-                trackPageXRef.current = pageX;
-              }
-            }
-          );
-        }
-        const newPos = calculateSeekPosition(evt.nativeEvent.pageX, evt.nativeEvent.locationX);
-        setScrubPositionMs(newPos);
-        latestRef.current.onScrubbingStart?.();
-        latestRef.current.onScrubbingMove?.(newPos);
-      },
-      onPanResponderMove: (evt) => {
-        const newPos = calculateSeekPosition(evt.nativeEvent.pageX, evt.nativeEvent.locationX);
-        setScrubPositionMs(newPos);
-        const now = Date.now();
-        if (now - lastMoveCallTimeRef.current >= 40) {
-          lastMoveCallTimeRef.current = now;
-          latestRef.current.onScrubbingMove?.(newPos);
-        }
-      },
-      onPanResponderRelease: (evt) => {
-        const finalPos = calculateSeekPosition(evt.nativeEvent.pageX, evt.nativeEvent.locationX);
-        setIsScrubbing(false);
-        setScrubPositionMs(finalPos);
-        if (latestRef.current.onScrubbingEnd) {
-          latestRef.current.onScrubbingEnd(finalPos);
-        } else {
-          latestRef.current.onSeek(finalPos);
-        }
-      },
-      onPanResponderTerminate: () => {
-        setIsScrubbing(false);
-        const fallbackPos = scrubPositionMs;
-        if (latestRef.current.onScrubbingEnd) {
-          latestRef.current.onScrubbingEnd(fallbackPos);
-        } else {
-          latestRef.current.onSeek(fallbackPos);
-        }
-      },
-    })
-  );
+  const duration = Math.max(1, durationMs || 0);
+  const bufferPercent = durationMs > 0 ? Math.min(100, Math.max(0, (bufferedMs / duration) * 100)) : 0;
 
   return (
-    <View
-      ref={containerRef}
-      style={styles.touchArea}
-      onLayout={handleLayout}
-      {...panResponder.panHandlers}
-      testID="seek-bar"
-    >
-      <View style={styles.trackBackground}>
-        {/* Buffered Track */}
-        <View style={[styles.trackBuffered, { width: `${bufferPercent}%` }]} />
-        {/* Played Progress Track */}
-        <View style={[styles.trackProgress, { width: `${progressPercent}%` }]} />
-      </View>
-
-      {/* Scrubber Thumb */}
+    <GestureDetector gesture={panGesture.enabled(!disabled)}>
       <View
-        style={[
-          styles.thumb,
-          {
-            left: `${progressPercent}%`,
-            transform: [{ scale: isScrubbing ? 1.3 : 1 }],
-          },
-        ]}
-      />
-    </View>
+        style={styles.touchArea}
+        onLayout={handleLayout}
+        testID="seek-bar"
+      >
+        <View style={styles.trackBackground}>
+          {/* Buffered Track */}
+          <View style={[styles.trackBuffered, { width: `${bufferPercent}%` }]} />
+          {/* Played Progress Track */}
+          <Animated.View style={[styles.trackProgress, animatedProgressStyle]} />
+        </View>
+
+        {/* Scrubber Thumb */}
+        <Animated.View style={[styles.thumb, animatedThumbStyle]} />
+      </View>
+    </GestureDetector>
   );
 };
 
@@ -217,3 +241,4 @@ const styles = StyleSheet.create({
 });
 
 export const SeekBar = React.memo(SeekBarComponent);
+SeekBar.displayName = 'SeekBar';

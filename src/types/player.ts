@@ -87,3 +87,38 @@ export interface PlayerEventMap {
   completed: void;
   aspectRatioChanged: { mode: AspectRatioMode };
 }
+
+export type SeekLifecycleStatus = 'idle' | 'pending' | 'acknowledged' | 'timedOut' | 'failed';
+
+export interface PendingSeek {
+  requestId: number;
+  sessionId: number;
+  targetPositionMs: number;
+  previousPositionMs: number;
+  direction: 'forward' | 'backward' | 'stationary';
+  wasPlaying: boolean;
+  status: SeekLifecycleStatus;
+  requestedAt: number;
+  acknowledgedAt?: number | null;
+  error?: string | null;
+}
+
+export interface SeekDiagnosticEvent {
+  requestId: number;
+  sessionId: number;
+  mediaId: string | null;
+  requestedPositionMs: number;
+  safeTargetPositionMs: number;
+  previousNativePositionMs: number;
+  seekDirection: 'forward' | 'backward' | 'stationary';
+  wasPlayingBeforeSeek: boolean;
+  seekRequestedAt: number;
+  nativeSeekCompletedAt: number | null;
+  actualPositionAfterSeekMs: number | null;
+  firstFrameAfterSeekAt: number | null;
+  isBuffering: boolean;
+  playbackState: string;
+  watchdogTriggered: boolean;
+  seekCompleted: boolean;
+  status: SeekLifecycleStatus;
+}
