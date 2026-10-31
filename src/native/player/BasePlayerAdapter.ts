@@ -55,6 +55,8 @@ export abstract class BasePlayerAdapter implements IPlayerAdapter {
     return this.state === 'playing';
   }
 
+  setScrubbing(_isScrubbing: boolean): void {}
+
   protected setState(newState: PlayerState): void {
     if (this.state === newState) return;
     const previousState = this.state;

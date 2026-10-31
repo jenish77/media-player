@@ -33,6 +33,65 @@ export class ExpoVideoAdapter extends BasePlayerAdapter {
   private activeSeek: PendingSeek | null = null;
   private lastSeekDiagnostic: SeekDiagnosticEvent | null = null;
   private seekWatchdogTimer: any = null;
+  private seekDiagnosticProbeTimers: any[] = [];
+
+  private clearDiagnosticProbes(): void {
+    if (this.seekDiagnosticProbeTimers.length > 0) {
+      this.seekDiagnosticProbeTimers.forEach((timer) => clearTimeout(timer));
+      this.seekDiagnosticProbeTimers = [];
+    }
+  }
+
+  private scheduleDiagnosticProbes(
+    requestId: number,
+    targetMs: number,
+    sessionId: number
+  ): void {
+    this.clearDiagnosticProbes();
+    const token = this.sessionToken;
+    const requestedAt = this.activeSeek?.requestedAt ?? Date.now();
+    const intervals = [100, 250, 500, 1000, 2000, 5000];
+
+    intervals.forEach((intervalMs) => {
+      const timer = setTimeout(() => {
+        if (
+          this.sessionToken === token &&
+          this.isSeeking &&
+          this.activeSeek &&
+          this.activeSeek.requestId === requestId &&
+          this.activeSeek.sessionId === sessionId
+        ) {
+          const nativePosMs = this.progress.currentTimeMs;
+          const isBuffering =
+            this.state === 'buffering' ||
+            (this.player ? (this.player as any).status === 'loading' : false);
+          const nativePlaybackState = this.player
+            ? (this.player as any).status || this.state
+            : this.state;
+          const elapsed = Date.now() - requestedAt;
+
+          console.log(
+            `[SeekDiagnosticProbe] ${intervalMs}ms probe: req=${requestId}, target=${targetMs}ms, nativePosition=${nativePosMs}ms, bufferingState=${isBuffering}, nativePlaybackState=${nativePlaybackState}, elapsed=${elapsed}ms`
+          );
+        }
+      }, intervalMs);
+      this.seekDiagnosticProbeTimers.push(timer);
+    });
+  }
+
+  setScrubbing(isScrubbing: boolean): void {
+    if (this.player) {
+      try {
+        this.player.scrubbingModeOptions = {
+          scrubbingModeEnabled: isScrubbing,
+          increaseCodecOperatingRate: true,
+          enableDynamicScheduling: true,
+          useDecodeOnlyFlag: true,
+          allowSkippingMediaCodecFlush: true,
+        };
+      } catch {}
+    }
+  }
 
   getLastSeekDiagnostic(): SeekDiagnosticEvent | null {
     return this.lastSeekDiagnostic;
@@ -77,9 +136,19 @@ export class ExpoVideoAdapter extends BasePlayerAdapter {
           this.player.timeUpdateEventInterval = 0.25;
         } catch (e) {}
 
+        // Configure hardware-accelerated scrubbing and seeking parameters for Android MediaCodec
+        try {
+          this.player.scrubbingModeOptions = {
+            increaseCodecOperatingRate: true,
+            enableDynamicScheduling: true,
+            useDecodeOnlyFlag: true,
+            allowSkippingMediaCodecFlush: true,
+          };
+        } catch (e) {}
+
         // Enable fast seek tolerance to seek to nearest keyframe and eliminate decode freezing
         try {
-          this.player.seekTolerance = { toleranceBefore: 0.5, toleranceAfter: 0.5 };
+          this.player.seekTolerance = { toleranceBefore: 1.0, toleranceAfter: 1.0 };
         } catch (e) {}
 
         if (options?.autoPlay) {
@@ -132,6 +201,7 @@ export class ExpoVideoAdapter extends BasePlayerAdapter {
 
     // 1. Error path
     if (options?.isError) {
+      this.clearDiagnosticProbes();
       if (this.seekWatchdogTimer) {
         clearTimeout(this.seekWatchdogTimer);
         this.seekWatchdogTimer = null;
@@ -152,6 +222,7 @@ export class ExpoVideoAdapter extends BasePlayerAdapter {
 
     // 2. PlayToEnd / Ended path
     if (options?.isEnded) {
+      this.clearDiagnosticProbes();
       if (this.seekWatchdogTimer) {
         clearTimeout(this.seekWatchdogTimer);
         this.seekWatchdogTimer = null;
@@ -175,6 +246,7 @@ export class ExpoVideoAdapter extends BasePlayerAdapter {
 
     // 3. Timeout / Watchdog path
     if (options?.isTimeout) {
+      this.clearDiagnosticProbes();
       const posDiff = Math.abs(nativeCurrentMs - targetPositionMs);
       const isBuffering = this.state === 'buffering' || this.player?.status === 'loading';
       const reachedTarget =
@@ -306,9 +378,11 @@ export class ExpoVideoAdapter extends BasePlayerAdapter {
     }
 
     // Acknowledged!
+    this.clearDiagnosticProbes();
     const completedAt = Date.now();
+    const seekCompletionTime = completedAt - this.activeSeek.requestedAt;
     console.log(
-      `[SeekDiagnostic] Seek #${requestId} acknowledged via ${eventSource}: current=${nativeCurrentMs}ms, target=${targetPositionMs}ms, latency=${completedAt - this.activeSeek.requestedAt}ms`
+      `[SeekDiagnostic] Seek #${requestId} acknowledged via ${eventSource}: current=${nativeCurrentMs}ms, target=${targetPositionMs}ms, latency=${seekCompletionTime}ms, seekCompletionTime=${seekCompletionTime}ms`
     );
 
     if (this.seekWatchdogTimer) {
@@ -450,6 +524,7 @@ export class ExpoVideoAdapter extends BasePlayerAdapter {
   }
 
   private cleanupNativePlayer(): void {
+    this.clearDiagnosticProbes();
     if (this.seekWatchdogTimer) {
       clearTimeout(this.seekWatchdogTimer);
       this.seekWatchdogTimer = null;
@@ -646,26 +721,30 @@ export class ExpoVideoAdapter extends BasePlayerAdapter {
     const seconds = safeTargetMs / 1000;
     if (this.player) {
       try {
+        // 1. Immediately pause native playback during seek so the player does not continue
+        // playing the old audio/video buffer forward at 1x speed while the seek is processed.
+        if (typeof this.player.pause === 'function') {
+          this.player.pause();
+        }
+
         try {
-          this.player.seekTolerance = { toleranceBefore: 0.5, toleranceAfter: 0.5 };
-        } catch (e) {}
+          this.player.seekTolerance = {
+            toleranceBefore: safeTargetMs <= 1000 ? 0 : 1.0,
+            toleranceAfter: durationMs > 0 && safeTargetMs >= durationMs - 1000 ? 0 : 1.0,
+          };
+        } catch {}
 
         this.player.currentTime = seconds;
-        if (wasPlaying) {
-          this.player.play();
-        }
       } catch (e) {
         console.warn('[SeekDiagnostic] ExpoVideoAdapter seek error:', e);
       }
     }
 
-    if (wasPlaying) {
-      this.setState('playing');
-      this.startProgressPolling(this.sessionToken);
-    } else {
-      this.setState('paused');
-      this.stopProgressPolling();
-    }
+    // 2. Stop progress polling during seek to eliminate runBlocking JNI contention on the Android main looper.
+    this.stopProgressPolling();
+
+    // 3. Schedule targeted diagnostic probes at 100ms, 250ms, 500ms, 1000ms, 2000ms, 5000ms
+    this.scheduleDiagnosticProbes(currentRequestId, safeTargetMs, currentSeekSession);
 
     const token = this.sessionToken;
     const targetReqId = currentRequestId;

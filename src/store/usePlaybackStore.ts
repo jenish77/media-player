@@ -745,6 +745,9 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
     authoritativeSeekTargetMs = null;
     wasPlayingBeforeScrub =
       get().state === 'playing' || (activeAdapter.isPlaying ? activeAdapter.isPlaying() : false);
+    if (typeof activeAdapter.setScrubbing === 'function') {
+      activeAdapter.setScrubbing(true);
+    }
     const timer = get().autoHideTimer;
     if (timer) clearTimeout(timer);
     set({
@@ -771,6 +774,9 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
     if (get().isLocked) return;
     if (!get().isScrubbing) {
       return;
+    }
+    if (typeof activeAdapter.setScrubbing === 'function') {
+      activeAdapter.setScrubbing(false);
     }
     const shouldResume =
       wasPlayingBeforeScrub ??

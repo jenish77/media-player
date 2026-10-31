@@ -3,8 +3,6 @@ import {
   PlaybackOptions,
   PlaybackProgress,
   SubtitleStyle,
-  SubtitleTrack,
-  AudioTrack,
   PlayerEventType,
   PlayerEventMap,
 } from '../../types/player';
@@ -34,6 +32,7 @@ export interface IPlayerAdapter {
   setSubtitleDelay(milliseconds: number): Promise<void>;
   setAudioDelay(milliseconds: number): Promise<void>;
   setAspectRatio(mode: AspectRatioMode): Promise<void>;
+  setScrubbing?(isScrubbing: boolean): void;
 
   addListener<K extends PlayerEventType>(
     event: K,
