@@ -11,7 +11,7 @@ import {
 import { Trash2, RotateCcw, Play } from 'lucide-react-native';
 import { useLibraryStore } from '../../store/useLibraryStore';
 import { usePlaybackStore } from '../../store/usePlaybackStore';
-import { clearWatchHistory, updatePlaybackPosition } from '../../services/database/mediaRepository';
+import { clearWatchHistory, removeFromWatchHistory } from '../../services/database/mediaRepository';
 import { EmptyState } from '../../components/EmptyState';
 import { formatDuration, formatDate } from '../../utils/formatters';
 import { palette, darkTheme } from '../../theme/colors';
@@ -50,7 +50,7 @@ export const HistoryScreen: React.FC<HistoryScreenProps> = ({ navigation }) => {
   };
 
   const handleRemoveItem = async (media: MediaItem) => {
-    await updatePlaybackPosition(media.id, 0);
+    await removeFromWatchHistory(media.id);
     await loadLibrary();
   };
 

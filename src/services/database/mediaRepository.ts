@@ -164,6 +164,15 @@ export async function deleteMediaItem(id: string): Promise<void> {
   await db.runAsync('DELETE FROM media_items WHERE id = ?', [id]);
 }
 
+export async function removeFromWatchHistory(id: string): Promise<void> {
+  const db = await getDatabase();
+  const now = Date.now();
+  await db.runAsync(
+    'UPDATE media_items SET last_position_ms = 0, last_played_at = NULL, updated_at = ? WHERE id = ?',
+    [now, id]
+  );
+}
+
 export async function clearWatchHistory(): Promise<void> {
   const db = await getDatabase();
   const now = Date.now();
