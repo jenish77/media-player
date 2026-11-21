@@ -10,6 +10,7 @@ import {
   ScrollView,
   StatusBar,
   Alert,
+  Platform,
 } from 'react-native';
 import { Image } from 'expo-image';
 import {
@@ -33,6 +34,8 @@ import { palette, darkTheme } from '../../theme/colors';
 import { typography } from '../../theme/typography';
 import { borderRadius, spacing } from '../../theme/spacing';
 import { formatDuration } from '../../utils/formatters';
+import { AdBanner } from '../../components/ads/AdBanner';
+import { isExpoGo } from '../../utils/environment';
 
 let ScreenOrientation: any = null;
 try {
@@ -87,6 +90,25 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({ navigation }) => {
   );
 
   const handlePlayVideo = async (media: MediaItem) => {
+    if (
+      isExpoGo &&
+      Platform.OS === 'android' &&
+      media.sourceReference?.startsWith('content://media/external/')
+    ) {
+      Alert.alert(
+        'Expo Go Media Access',
+        'This video was indexed via Android MediaStore which Expo Go cannot stream directly.\n\nTap "Select Video" to browse and play this video using the system file picker.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Select Video',
+            onPress: handleOpenDocument,
+          },
+        ]
+      );
+      return;
+    }
+
     const list = filteredItems.length > 0 ? filteredItems : mediaItems;
     const index = list.findIndex((item) => item.id === media.id);
     usePlaybackStore.getState().setQueue(list, index >= 0 ? index : 0);
@@ -95,6 +117,21 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({ navigation }) => {
   };
 
   const handleScan = async () => {
+    if (isExpoGo && Platform.OS === 'android') {
+      Alert.alert(
+        'Expo Go Testing Mode',
+        'Android 13+ restricts automated gallery scanning inside Expo Go.\n\nTap "Open Video File" to browse and select any video directly from your device storage.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Open Video File',
+            onPress: handleOpenDocument,
+          },
+        ]
+      );
+      return;
+    }
+
     try {
       const res = await scanMedia();
       if (res && res.errors && res.errors.length > 0 && res.addedCount === 0) {
@@ -301,18 +338,39 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({ navigation }) => {
         ListEmptyComponent={
           <EmptyState
             icon={searchQuery ? 'search' : 'video'}
-            title={searchQuery ? 'No videos found' : 'No videos in library'}
+            title={
+              searchQuery
+                ? 'No videos found'
+                : isExpoGo
+                ? 'Test Videos in Expo Go'
+                : 'No videos in library'
+            }
             description={
               searchQuery
                 ? `No videos match "${searchQuery}". Try a different keyword.`
+                : isExpoGo
+                ? 'Select any video from your device storage (Downloads, Movies, DCIM) to test playback in Expo Go.'
                 : 'Scan your device to discover videos or open a file from storage.'
             }
-            actionLabel={searchQuery ? undefined : 'Scan Videos'}
-            onAction={searchQuery ? undefined : handleScan}
+            actionLabel={
+              searchQuery
+                ? undefined
+                : isExpoGo
+                ? 'Open Video File'
+                : 'Scan Videos'
+            }
+            onAction={
+              searchQuery
+                ? undefined
+                : isExpoGo
+                ? handleOpenDocument
+                : handleScan
+            }
             isLoading={isScanning}
           />
         }
       />
+      <AdBanner position="bottom" />
     </View>
   );
 };

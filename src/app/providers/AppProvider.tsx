@@ -5,6 +5,18 @@ import { useSettingsStore } from '../../store/useSettingsStore';
 import { usePlaybackStore } from '../../store/usePlaybackStore';
 import { playbackPersistence } from '../../services/playbackPersistence';
 import { darkTheme } from '../../theme/colors';
+import { requestMediaPermissions } from '../../services/mediaDiscovery/mediaDiscoveryService';
+import { isExpoGo } from '../../utils/environment';
+
+// Dynamically import Mobile Ads SDK only in standalone native builds
+let mobileAds: any = null;
+if (!isExpoGo) {
+  try {
+    mobileAds = require('react-native-google-mobile-ads').default;
+  } catch (e) {
+    // Native module not available
+  }
+}
 
 interface AppProviderProps {
   children: React.ReactNode;
@@ -20,6 +32,22 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
       try {
         await getDatabase();
         await loadSettings();
+
+        // Request media permissions so app has media access
+        try {
+          await requestMediaPermissions();
+        } catch (permErr) {
+          console.warn('Initial permission check error:', permErr);
+        }
+
+        // Initialize Google Mobile Ads SDK in native build
+        if (!isExpoGo && mobileAds) {
+          try {
+            await mobileAds().initialize();
+          } catch (adsErr) {
+            console.warn('AdMob initialize warning:', adsErr);
+          }
+        }
       } catch (err) {
         console.warn('Initialization warning:', err);
       } finally {

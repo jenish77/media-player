@@ -14,6 +14,7 @@ import { GestureOverlay } from '../../components/GestureOverlay';
 import { SubtitleOverlay } from '../../components/SubtitleOverlay';
 import { ErrorState } from '../../components/ErrorState';
 import { SubtitleAudioBottomSheet } from '../subtitles/SubtitleAudioBottomSheet';
+import { pickVideoFromDocumentPicker } from '../../services/mediaDiscovery/mediaDiscoveryService';
 import { AspectRatioMode } from '../../types/media';
 
 let VideoViewComponent: any = null;
@@ -522,6 +523,14 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ navigation, route })
             }
           }}
           onGoBack={handleExit}
+          onPickFile={async () => {
+            try {
+              const picked = await pickVideoFromDocumentPicker();
+              if (picked) {
+                await loadMedia(picked, true);
+              }
+            } catch (err: any) {}
+          }}
         />
       )}
     </View>

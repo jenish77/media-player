@@ -1,6 +1,6 @@
 import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
-import { AlertTriangle, RefreshCw, ArrowLeft } from 'lucide-react-native';
+import { AlertTriangle, RefreshCw, ArrowLeft, FolderOpen } from 'lucide-react-native';
 import { palette, darkTheme } from '../theme/colors';
 import { typography } from '../theme/typography';
 import { borderRadius, spacing } from '../theme/spacing';
@@ -10,12 +10,26 @@ interface ErrorStateProps {
   error: PlayerError | null;
   onRetry?: () => void;
   onGoBack?: () => void;
+  onPickFile?: () => void;
 }
 
-export const ErrorState: React.FC<ErrorStateProps> = ({ error, onRetry, onGoBack }) => {
-  const message = error?.message || 'An unexpected error occurred while loading this video.';
+export const ErrorState: React.FC<ErrorStateProps> = ({ error, onRetry, onGoBack, onPickFile }) => {
+  let message = error?.message || 'An unexpected error occurred while loading this video.';
   const code = error?.code || 'UNKNOWN_ERROR';
   const isRecoverable = error?.recoverable ?? false;
+
+  const isPermissionOrSecurity =
+    Boolean(
+      error?.technicalDetails?.includes('SecurityException') ||
+      error?.technicalDetails?.includes('host.exp.exponent') ||
+      error?.message?.includes('sandboxing') ||
+      error?.message?.includes('MediaStore')
+    );
+
+  if (isPermissionOrSecurity) {
+    message =
+      'Expo Go cannot stream videos directly from the Android gallery due to Scoped Storage restrictions. Select the video file directly or use a standalone APK build.';
+  }
 
   return (
     <View style={styles.container} testID="error-state">
@@ -23,11 +37,15 @@ export const ErrorState: React.FC<ErrorStateProps> = ({ error, onRetry, onGoBack
         <AlertTriangle size={42} color={palette.error} />
       </View>
 
-      <Text style={styles.codeText}>ERROR CODE: {code}</Text>
-      <Text style={styles.title}>Playback Failed</Text>
+      <Text style={styles.codeText}>
+        {isPermissionOrSecurity ? 'STORAGE RESTRICTION' : `ERROR CODE: ${code}`}
+      </Text>
+      <Text style={styles.title}>
+        {isPermissionOrSecurity ? 'Permission Restricted' : 'Playback Failed'}
+      </Text>
       <Text style={styles.message}>{message}</Text>
 
-      {error?.technicalDetails && (
+      {error?.technicalDetails && !isPermissionOrSecurity && (
         <View style={styles.detailsBox}>
           <Text style={styles.detailsText} numberOfLines={3}>
             {error.technicalDetails}
@@ -43,7 +61,14 @@ export const ErrorState: React.FC<ErrorStateProps> = ({ error, onRetry, onGoBack
           </TouchableOpacity>
         )}
 
-        {isRecoverable && onRetry && (
+        {isPermissionOrSecurity && onPickFile && (
+          <TouchableOpacity style={styles.primaryButton} onPress={onPickFile} activeOpacity={0.8}>
+            <FolderOpen size={18} color={palette.white} style={styles.buttonIcon} />
+            <Text style={styles.primaryButtonText}>Select File</Text>
+          </TouchableOpacity>
+        )}
+
+        {!isPermissionOrSecurity && isRecoverable && onRetry && (
           <TouchableOpacity style={styles.primaryButton} onPress={onRetry} activeOpacity={0.8}>
             <RefreshCw size={18} color={palette.white} style={styles.buttonIcon} />
             <Text style={styles.primaryButtonText}>Retry</Text>

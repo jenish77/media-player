@@ -7,6 +7,7 @@ import {
   TouchableOpacity,
   StatusBar,
   Alert,
+  Platform,
 } from 'react-native';
 import { Trash2, RotateCcw, Play } from 'lucide-react-native';
 import { useLibraryStore } from '../../store/useLibraryStore';
@@ -14,6 +15,8 @@ import { usePlaybackStore } from '../../store/usePlaybackStore';
 import { clearWatchHistory, removeFromWatchHistory } from '../../services/database/mediaRepository';
 import { EmptyState } from '../../components/EmptyState';
 import { formatDuration, formatDate } from '../../utils/formatters';
+import { AdBanner } from '../../components/ads/AdBanner';
+import { isExpoGo } from '../../utils/environment';
 import { palette, darkTheme } from '../../theme/colors';
 import { typography } from '../../theme/typography';
 import { borderRadius, spacing } from '../../theme/spacing';
@@ -32,6 +35,18 @@ export const HistoryScreen: React.FC<HistoryScreenProps> = ({ navigation }) => {
   }, []);
 
   const handleResume = async (media: MediaItem) => {
+    if (
+      isExpoGo &&
+      Platform.OS === 'android' &&
+      media.sourceReference?.startsWith('content://media/external/')
+    ) {
+      Alert.alert(
+        'Expo Go Media Access',
+        'This video was indexed via Android MediaStore which Expo Go cannot stream directly. Please use "Open Video" from the Library screen to select and test this file.'
+      );
+      return;
+    }
+
     const index = recent.findIndex((item) => item.id === media.id);
     if (recent.length > 0) {
       usePlaybackStore.getState().setQueue(recent, index >= 0 ? index : 0);
@@ -41,6 +56,18 @@ export const HistoryScreen: React.FC<HistoryScreenProps> = ({ navigation }) => {
   };
 
   const handleStartOver = async (media: MediaItem) => {
+    if (
+      isExpoGo &&
+      Platform.OS === 'android' &&
+      media.sourceReference?.startsWith('content://media/external/')
+    ) {
+      Alert.alert(
+        'Expo Go Media Access',
+        'This video was indexed via Android MediaStore which Expo Go cannot stream directly. Please use "Open Video" from the Library screen to select and test this file.'
+      );
+      return;
+    }
+
     const index = recent.findIndex((item) => item.id === media.id);
     if (recent.length > 0) {
       usePlaybackStore.getState().setQueue(recent, index >= 0 ? index : 0);
@@ -163,6 +190,7 @@ export const HistoryScreen: React.FC<HistoryScreenProps> = ({ navigation }) => {
           />
         }
       />
+      <AdBanner position="bottom" />
     </View>
   );
 };

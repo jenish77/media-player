@@ -1,8 +1,10 @@
 import { Platform } from 'react-native';
 import { MediaItem, SourceType } from '../../types/media';
 import { extractFileName, extractFileExtension, extractFolderName, getContainerFromExtension } from '../../utils/pathUtils';
+import { resolveStableUri } from '../../utils/uriResolver';
 import { upsertMediaItemsBatch, upsertMediaItem } from '../database/mediaRepository';
 import { isImageUri, isSupportedThumbnailUri } from '../thumbnailService';
+import { isExpoGo } from '../../utils/environment';
 
 let LegacyMediaLibrary: any = null;
 let ModernMediaLibrary: any = null;
@@ -10,11 +12,7 @@ let DocumentPicker: any = null;
 
 try {
   LegacyMediaLibrary = require('expo-media-library/legacy');
-} catch (e1) {
-  try {
-    LegacyMediaLibrary = require('expo-media-library/build/legacy/MediaLibrary');
-  } catch (e2) {}
-}
+} catch (e1) {}
 
 try {
   ModernMediaLibrary = require('expo-media-library');
@@ -37,6 +35,12 @@ export async function requestMediaPermissions(): Promise<boolean> {
   const lib = LegacyMediaLibrary || ModernMediaLibrary;
   if (!lib) return false;
 
+  // In Expo Go on Android, accessing the native media library for videos is restricted by Expo Go.
+  // Return false cleanly without triggering unhandled native permission errors.
+  if (isExpoGo && Platform.OS === 'android') {
+    return false;
+  }
+
   const isGranted = (p: any) =>
     !!p &&
     (p.granted === true ||
@@ -49,9 +53,7 @@ export async function requestMediaPermissions(): Promise<boolean> {
     if (typeof lib.getPermissionsAsync === 'function') {
       try {
         perm = await lib.getPermissionsAsync(false, ['video']);
-      } catch {
-        perm = await lib.getPermissionsAsync();
-      }
+      } catch (e) {}
     }
 
     if (isGranted(perm)) {
@@ -62,9 +64,7 @@ export async function requestMediaPermissions(): Promise<boolean> {
       let req: any = null;
       try {
         req = await lib.requestPermissionsAsync(false, ['video']);
-      } catch {
-        req = await lib.requestPermissionsAsync();
-      }
+      } catch (e) {}
       return isGranted(req);
     }
 
@@ -89,7 +89,13 @@ export async function scanDeviceVideos(): Promise<ScanResult> {
 
   const hasPermission = await requestMediaPermissions();
   if (!hasPermission) {
-    result.errors.push('Media permission was denied. Please grant Video/Media permissions to Nova Player');
+    if (isExpoGo && Platform.OS === 'android') {
+      result.errors.push(
+        'Expo Go limits automated gallery scanning on Android.\nPlease use the Folder icon (top right) or "Import Videos" to select videos directly from your storage.'
+      );
+    } else {
+      result.errors.push('Media permission was denied. Please grant Video/Media permissions to Nova Player in Android Settings.');
+    }
     return result;
   }
 
@@ -208,7 +214,7 @@ export async function scanDeviceVideos(): Promise<ScanResult> {
       mediaItems.push({
         id: `media_${asset.id || Math.random().toString(36).substring(2, 9)}`,
         sourceType,
-        sourceReference: asset.uri,
+        sourceReference: resolveStableUri(asset.uri),
         displayName: filename,
         durationMs: asset.duration ? Math.round(asset.duration * 1000) : null,
         sizeBytes: null,
@@ -252,44 +258,68 @@ export async function pickVideoFromDocumentPicker(): Promise<MediaItem | null> {
 
   const res = await DocumentPicker.getDocumentAsync({
     type: ['video/*', 'application/x-matroska', 'video/mp4', 'video/mkv', 'video/webm'],
-    copyToCacheDirectory: false,
+    copyToCacheDirectory: true,
+    multiple: true,
   });
 
   if (res.canceled || !res.assets || res.assets.length === 0) {
     return null;
   }
 
-  const asset = res.assets[0];
   const now = Date.now();
-  const ext = extractFileExtension(asset.name);
-  const sourceType: SourceType = Platform.OS === 'android' ? 'android_saf' : 'ios_document';
+  const itemsToAdd: MediaItem[] = [];
 
-  const mediaItem: MediaItem = {
-    id: `doc_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-    sourceType,
-    sourceReference: asset.uri,
-    displayName: asset.name,
-    durationMs: null,
-    sizeBytes: asset.size || null,
-    width: null,
-    height: null,
-    mimeType: asset.mimeType || (ext ? `video/${ext}` : 'video/*'),
-    container: getContainerFromExtension(ext),
-    dateAdded: now,
-    lastSeenAt: now,
-    availabilityStatus: 'available',
-    thumbnailStatus: 'none',
-    thumbnailUri: null,
-    lastPositionMs: 0,
-    lastPlayedAt: null,
-    isFavorite: false,
-    folderName: 'Selected Documents',
-    createdAt: now,
-    updatedAt: now,
-  };
+  for (const asset of res.assets) {
+    if (!asset.uri) continue;
+    const filename = asset.name || extractFileName(asset.uri);
+    const ext = extractFileExtension(filename);
+    const sourceType: SourceType = Platform.OS === 'android' ? 'android_saf' : 'ios_document';
 
-  await upsertMediaItem(mediaItem);
-  return mediaItem;
+    let resolvedUri = asset.uri;
+    // In Expo Go on Android, guarantee a direct file:// cache URI for ExoPlayer
+    if (isExpoGo && Platform.OS === 'android' && !resolvedUri.startsWith('file://')) {
+      try {
+        const FileSystem = require('expo-file-system');
+        const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+        const dest = `${FileSystem.cacheDirectory}${Date.now()}_${safeName}`;
+        await FileSystem.copyAsync({ from: resolvedUri, to: dest });
+        resolvedUri = dest;
+      } catch (cacheErr) {
+        console.warn('[pickVideoFromDocumentPicker] Cache copy warning:', cacheErr);
+      }
+    }
+
+    itemsToAdd.push({
+      id: `doc_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      sourceType,
+      sourceReference: resolvedUri,
+      displayName: filename,
+      durationMs: null,
+      sizeBytes: asset.size || null,
+      width: null,
+      height: null,
+      mimeType: asset.mimeType || (ext ? `video/${ext}` : 'video/*'),
+      container: getContainerFromExtension(ext),
+      dateAdded: now,
+      lastSeenAt: now,
+      availabilityStatus: 'available',
+      thumbnailStatus: 'none',
+      thumbnailUri: null,
+      lastPositionMs: 0,
+      lastPlayedAt: null,
+      isFavorite: false,
+      folderName: 'Imported Videos',
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  if (itemsToAdd.length > 0) {
+    await upsertMediaItemsBatch(itemsToAdd);
+    return itemsToAdd[0];
+  }
+
+  return null;
 }
 
 /**

@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { Platform } from 'react-native';
 import { MediaItem, AspectRatioMode } from '../types/media';
 import {
   PlayerState,
@@ -14,6 +15,8 @@ import { getDefaultPlayerAdapter, IPlayerAdapter } from '../native/player/Player
 import { playbackPersistence } from '../services/playbackPersistence';
 import { parseSubtitleFile } from '../utils/subtitleParser';
 import { clamp, validateMediaFile, getPlaybackResumeAction } from '../utils/edgeCaseHandlers';
+import { resolvePlayableUri } from '../utils/uriResolver';
+import { requestMediaPermissions } from '../services/mediaDiscovery/mediaDiscoveryService';
 
 let BrightnessModule: any = null;
 try {
@@ -624,7 +627,11 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
     });
 
     try {
-      await activeAdapter.load(media.sourceReference, {
+      if (Platform.OS === 'android') {
+        try { await requestMediaPermissions(); } catch (e) {}
+      }
+      const playableUri = await resolvePlayableUri(media.sourceReference);
+      await activeAdapter.load(playableUri, {
         startPositionMs: startPos,
         rate: get().playbackRate,
         autoPlay: true,
