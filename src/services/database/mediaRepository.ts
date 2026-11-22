@@ -30,13 +30,35 @@ function mapRowToMediaItem(row: any): MediaItem {
 export async function upsertMediaItem(item: MediaItem): Promise<void> {
   const db = await getDatabase();
   const sql = `
-    INSERT OR REPLACE INTO media_items (
+    INSERT INTO media_items (
       id, source_type, source_reference, display_name, duration_ms,
       size_bytes, width, height, mime_type, container,
       date_added, last_seen_at, availability_status, thumbnail_status,
       thumbnail_uri, last_position_ms, last_played_at, is_favorite,
       folder_name, created_at, updated_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      source_reference = excluded.source_reference,
+      display_name = excluded.display_name,
+      duration_ms = CASE
+        WHEN excluded.duration_ms IS NOT NULL AND excluded.duration_ms > 0 THEN excluded.duration_ms
+        ELSE media_items.duration_ms
+      END,
+      size_bytes = COALESCE(excluded.size_bytes, media_items.size_bytes),
+      width = COALESCE(excluded.width, media_items.width),
+      height = COALESCE(excluded.height, media_items.height),
+      last_seen_at = excluded.last_seen_at,
+      availability_status = excluded.availability_status,
+      thumbnail_uri = CASE
+        WHEN excluded.thumbnail_uri IS NOT NULL AND excluded.thumbnail_uri != '' THEN excluded.thumbnail_uri
+        ELSE media_items.thumbnail_uri
+      END,
+      thumbnail_status = CASE
+        WHEN media_items.thumbnail_status = 'ready' THEN 'ready'
+        ELSE excluded.thumbnail_status
+      END,
+      folder_name = COALESCE(excluded.folder_name, media_items.folder_name),
+      updated_at = excluded.updated_at
   `;
 
   await db.runAsync(sql, [
@@ -62,6 +84,20 @@ export async function upsertMediaItem(item: MediaItem): Promise<void> {
     item.createdAt,
     item.updatedAt,
   ]);
+}
+
+export async function updateMediaDuration(id: string, durationMs: number): Promise<void> {
+  if (!id || !durationMs || durationMs <= 0) return;
+  try {
+    const db = await getDatabase();
+    const now = Date.now();
+    await db.runAsync(
+      'UPDATE media_items SET duration_ms = ?, updated_at = ? WHERE id = ?',
+      [Math.round(durationMs), now, id]
+    );
+  } catch (e) {
+    console.warn('Failed to update media duration:', e);
+  }
 }
 
 export async function upsertMediaItemsBatch(items: MediaItem[]): Promise<void> {

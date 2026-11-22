@@ -28,12 +28,11 @@
       "predictiveBackGestureEnabled": false,
       "permissions": [
         "android.permission.READ_EXTERNAL_STORAGE",
-        "android.permission.WRITE_EXTERNAL_STORAGE",
         "android.permission.READ_MEDIA_VIDEO",
-        "android.permission.READ_MEDIA_IMAGES",
-        "android.permission.READ_MEDIA_AUDIO",
         "android.permission.READ_MEDIA_VISUAL_USER_SELECTED",
-        "android.permission.WAKE_LOCK",
+        "android.permission.WAKE_LOCK"
+      ],
+      "blockedPermissions": [
         "android.permission.WRITE_SETTINGS"
       ],
       "intentFilters": [
@@ -69,9 +68,7 @@
           "savePhotosPermission": "Allow Nova Player to save video thumbnails and snapshots.",
           "isAccessMediaLocationEnabled": false,
           "granularPermissions": [
-            "photo",
-            "video",
-            "audio"
+            "video"
           ]
         }
       ],
@@ -83,24 +80,12 @@
         {
           "enforceContrast": false,
           "hidden": false,
-          "style": "dark"
-        }
-      ],
-      [
-        "react-native-google-mobile-ads",
-        {
-          "androidAppId": "ca-app-pub-4691559300152959~5348736341",
-          "iosAppId": "ca-app-pub-3940256099942544~1458002511"
+          "style": "light"
         }
       ],
       "expo-status-bar"
     ],
     "extra": {
-      "expo-navigation-bar": {
-        "enforceContrast": false,
-        "style": "dark",
-        "hidden": false
-      },
       "eas": {
         "projectId": "17946877-c9bc-4810-a510-c9ba06e2fb39"
       }

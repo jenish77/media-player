@@ -12,10 +12,22 @@
       "distribution": "internal",
       "android": {
         "buildType": "apk"
+      },
+      "env": {
+        "EXPO_PUBLIC_ADMOB_ANDROID_APP_ID": "ca-app-pub-3940256099942544~3347511713",
+        "EXPO_PUBLIC_ADMOB_IOS_APP_ID": "ca-app-pub-3940256099942544~1458002511",
+        "EXPO_PUBLIC_ADMOB_ANDROID_BANNER_UNIT_ID": "ca-app-pub-3940256099942544/6300978111",
+        "EXPO_PUBLIC_ADMOB_IOS_BANNER_UNIT_ID": "ca-app-pub-3940256099942544/2934735716"
       }
     },
     "production": {
-      "autoIncrement": true
+      "autoIncrement": true,
+      "env": {
+        "EXPO_PUBLIC_ADMOB_ANDROID_APP_ID": "ca-app-pub-4691559300152959~5348736341",
+        "EXPO_PUBLIC_ADMOB_IOS_APP_ID": "ca-app-pub-3940256099942544~1458002511",
+        "EXPO_PUBLIC_ADMOB_ANDROID_BANNER_UNIT_ID": "ca-app-pub-4691559300152959/2395269946",
+        "EXPO_PUBLIC_ADMOB_IOS_BANNER_UNIT_ID": "ca-app-pub-3940256099942544/2934735716"
+      }
     }
   },
   "submit": {

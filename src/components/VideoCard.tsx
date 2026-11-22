@@ -5,6 +5,7 @@ import { Play, Star, MoreVertical, Film } from 'lucide-react-native';
 import { MediaItem } from '../types/media';
 import { formatDuration, formatBytes } from '../utils/formatters';
 import { getThumbnailForMedia, isSupportedThumbnailUri } from '../services/thumbnailService';
+import { resolveMediaDuration } from '../services/metadataService';
 import { palette, darkTheme } from '../theme/colors';
 import { typography } from '../theme/typography';
 import { borderRadius, spacing } from '../theme/spacing';
@@ -65,18 +66,40 @@ export const VideoCard: React.FC<VideoCardProps> = ({
   const [currentMediaId, setCurrentMediaId] = useState(media.id);
   const [imgError, setImgError] = useState(false);
   const [thumbSource, setThumbSource] = useState<any>(resolveInitialThumb);
+  const [asyncDurationMs, setAsyncDurationMs] = useState<number | null>(null);
 
   if (currentMediaId !== media.id) {
     setCurrentMediaId(media.id);
     setImgError(false);
     setThumbSource(resolveInitialThumb());
+    setAsyncDurationMs(null);
   }
 
-  const duration = formatDuration(media.durationMs);
+  useEffect(() => {
+    if (media.durationMs && media.durationMs > 0) {
+      return;
+    }
+
+    let isMounted = true;
+    resolveMediaDuration(media)
+      .then((resolved) => {
+        if (isMounted && resolved && resolved > 0) {
+          setAsyncDurationMs(resolved);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      isMounted = false;
+    };
+  }, [media.id, media.durationMs]);
+
+  const effectiveDurationMs = (media.durationMs && media.durationMs > 0) ? media.durationMs : asyncDurationMs;
+  const duration = formatDuration(effectiveDurationMs);
   const size = formatBytes(media.sizeBytes);
   const progressPercent =
-    media.durationMs && media.durationMs > 0 && media.lastPositionMs > 0
-      ? Math.min(100, Math.round((media.lastPositionMs / media.durationMs) * 100))
+    effectiveDurationMs && effectiveDurationMs > 0 && media.lastPositionMs > 0
+      ? Math.min(100, Math.round((media.lastPositionMs / effectiveDurationMs) * 100))
       : 0;
 
   useEffect(() => {

@@ -21,6 +21,8 @@ interface GestureOverlayProps {
   onDoubleTapRight: () => void;
   onBrightnessChange?: (brightness: number) => void;
   onVolumeChange?: (volume: number) => void;
+  onBrightnessComplete?: (brightness: number) => void;
+  onVolumeComplete?: (volume: number) => void;
   currentBrightness?: number;
   currentVolume?: number;
   skipSeconds?: number;
@@ -39,6 +41,8 @@ const GestureOverlayComponent: React.FC<GestureOverlayProps> = ({
   onDoubleTapRight,
   onBrightnessChange,
   onVolumeChange,
+  onBrightnessComplete,
+  onVolumeComplete,
   currentBrightness = 0.5,
   currentVolume = 0.5,
   skipSeconds = 10,
@@ -55,7 +59,10 @@ const GestureOverlayComponent: React.FC<GestureOverlayProps> = ({
   // Local HUD display state for instantaneous 60fps rendering without bridge lag
   const [displayVolume, setDisplayVolume] = useState<number>(currentVolume);
   const [displayBrightness, setDisplayBrightness] = useState<number>(currentBrightness);
-  const lastDispatchTimeRef = useRef<number>(0);
+
+  // Screen dimensions cache (updated on touch grant and orientation change)
+  const screenWidthRef = useRef<number>(Dimensions.get('window').width);
+  const screenHeightRef = useRef<number>(Dimensions.get('window').height);
 
   // Fresh refs to prevent stale closure inside PanResponder
   const currentVolumeRef = useRef<number>(currentVolume);
@@ -72,6 +79,12 @@ const GestureOverlayComponent: React.FC<GestureOverlayProps> = ({
 
   const onBrightnessChangeRef = useRef(onBrightnessChange);
   onBrightnessChangeRef.current = onBrightnessChange;
+
+  const onVolumeCompleteRef = useRef(onVolumeComplete);
+  onVolumeCompleteRef.current = onVolumeComplete;
+
+  const onBrightnessCompleteRef = useRef(onBrightnessComplete);
+  onBrightnessCompleteRef.current = onBrightnessComplete;
 
   const onSingleTapRef = useRef(onSingleTap);
   onSingleTapRef.current = onSingleTap;
@@ -105,6 +118,51 @@ const GestureOverlayComponent: React.FC<GestureOverlayProps> = ({
   const touchStartYRef = useRef<number>(0);
   const touchStartXRef = useRef<number>(0);
   const isVerticalSwipeRef = useRef<boolean>(false);
+
+  // High-performance RAF throttles for hardware dispatch
+  const pendingBrightnessRef = useRef<number | null>(null);
+  const brightnessRafRef = useRef<number | null>(null);
+  const isBrightnessInFlightRef = useRef<boolean>(false);
+
+  const pendingVolumeRef = useRef<number | null>(null);
+  const volumeRafRef = useRef<number | null>(null);
+
+  const updateHardwareBrightness = (val: number) => {
+    pendingBrightnessRef.current = val;
+    if (brightnessRafRef.current === null) {
+      brightnessRafRef.current = requestAnimationFrame(async () => {
+        brightnessRafRef.current = null;
+        const target = pendingBrightnessRef.current;
+        if (target === null || isBrightnessInFlightRef.current) return;
+
+        isBrightnessInFlightRef.current = true;
+        try {
+          if (onBrightnessChangeRef.current) {
+            await onBrightnessChangeRef.current(target);
+          }
+        } catch (e) {
+        } finally {
+          isBrightnessInFlightRef.current = false;
+          if (pendingBrightnessRef.current !== target && pendingBrightnessRef.current !== null) {
+            updateHardwareBrightness(pendingBrightnessRef.current);
+          }
+        }
+      });
+    }
+  };
+
+  const updateHardwareVolume = (val: number) => {
+    pendingVolumeRef.current = val;
+    if (volumeRafRef.current === null) {
+      volumeRafRef.current = requestAnimationFrame(() => {
+        volumeRafRef.current = null;
+        const target = pendingVolumeRef.current;
+        if (target !== null) {
+          onVolumeChangeRef.current?.(target);
+        }
+      });
+    }
+  };
 
   useEffect(() => {
     if (!isVerticalSwipeRef.current) {
@@ -141,6 +199,8 @@ const GestureOverlayComponent: React.FC<GestureOverlayProps> = ({
       if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
       if (tapTimeoutRef.current) clearTimeout(tapTimeoutRef.current);
       if (unlockHintTimerRef.current) clearTimeout(unlockHintTimerRef.current);
+      if (brightnessRafRef.current) cancelAnimationFrame(brightnessRafRef.current);
+      if (volumeRafRef.current) cancelAnimationFrame(volumeRafRef.current);
     };
   }, []);
 
@@ -151,12 +211,15 @@ const GestureOverlayComponent: React.FC<GestureOverlayProps> = ({
         if (isLockedRef.current || !gesturesEnabledRef.current) return false;
         if (!swipeBrightnessEnabledRef.current && !swipeVolumeEnabledRef.current) return false;
         return (
-          Math.abs(gestureState.dy) >= 12 &&
-          Math.abs(gestureState.dy) > Math.abs(gestureState.dx) * 1.3
+          Math.abs(gestureState.dy) >= 8 &&
+          Math.abs(gestureState.dy) > Math.abs(gestureState.dx) * 1.2
         );
       },
       onPanResponderGrant: (evt) => {
-        // Read true current values from fresh refs to eliminate stale closure jumps
+        const { width, height } = Dimensions.get('window');
+        screenWidthRef.current = width;
+        screenHeightRef.current = height;
+
         initialVolumeRef.current = currentVolumeRef.current;
         initialBrightnessRef.current = currentBrightnessRef.current;
         touchStartXRef.current = evt.nativeEvent.pageX;
@@ -171,19 +234,19 @@ const GestureOverlayComponent: React.FC<GestureOverlayProps> = ({
       onPanResponderMove: (_evt, gestureState) => {
         if (isLockedRef.current || !gesturesEnabledRef.current) return;
 
-        const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
+        const screenWidth = screenWidthRef.current;
+        const screenHeight = screenHeightRef.current;
         const startY = touchStartYRef.current;
 
-        // Ignore gestures that originated in top header (65px) or bottom timeline (85px)
-        if (startY < 65 || startY > screenHeight - 85) {
+        // Ignore gestures originating in status bar header or timeline bottom
+        if (startY < 50 || startY > screenHeight - 65) {
           return;
         }
 
-        // Commit to vertical swipe if threshold is exceeded
         if (!isVerticalSwipeRef.current) {
           const isVertical =
-            Math.abs(gestureState.dy) >= 12 &&
-            Math.abs(gestureState.dy) > Math.abs(gestureState.dx) * 1.3;
+            Math.abs(gestureState.dy) >= 8 &&
+            Math.abs(gestureState.dy) > Math.abs(gestureState.dx) * 1.2;
 
           if (isVertical) {
             isVerticalSwipeRef.current = true;
@@ -200,54 +263,50 @@ const GestureOverlayComponent: React.FC<GestureOverlayProps> = ({
         const startX = touchStartXRef.current;
         const isLeftSide = startX < screenWidth / 2;
 
-        // Dragging UP (-dy) increases, dragging DOWN (+dy) decreases
-        // Adaptive sensitivity based on screen height
-        const sensitivity = Math.max(180, Math.min(300, screenHeight * 0.45));
+        // Natural, responsive sensitivity
+        const sensitivity = Math.max(200, Math.min(360, screenHeight * 0.55));
         const deltaFraction = -gestureState.dy / sensitivity;
 
-        const now = Date.now();
-        if (isLeftSide && swipeBrightnessEnabledRef.current && onBrightnessChangeRef.current) {
+        if (isLeftSide && swipeBrightnessEnabledRef.current) {
           setGestureType('brightness');
           const targetBrightness = Math.max(0, Math.min(1, initialBrightnessRef.current + deltaFraction));
           currentBrightnessRef.current = targetBrightness;
           setDisplayBrightness(targetBrightness);
-          if (now - lastDispatchTimeRef.current >= 80) {
-            lastDispatchTimeRef.current = now;
-            onBrightnessChangeRef.current(targetBrightness);
-          }
-        } else if (!isLeftSide && swipeVolumeEnabledRef.current && onVolumeChangeRef.current) {
+          updateHardwareBrightness(targetBrightness);
+        } else if (!isLeftSide && swipeVolumeEnabledRef.current) {
           setGestureType('volume');
           const targetVolume = Math.max(0, Math.min(1, initialVolumeRef.current + deltaFraction));
           currentVolumeRef.current = targetVolume;
           setDisplayVolume(targetVolume);
-          if (now - lastDispatchTimeRef.current >= 80) {
-            lastDispatchTimeRef.current = now;
-            onVolumeChangeRef.current(targetVolume);
-          }
+          updateHardwareVolume(targetVolume);
         }
       },
       onPanResponderRelease: (evt) => {
         if (isVerticalSwipeRef.current) {
           isVerticalSwipeRef.current = false;
-          // Ensure final value is dispatched upon gesture release
           if (activeGestureTypeRef.current === 'brightness') {
-            onBrightnessChangeRef.current?.(currentBrightnessRef.current);
+            const finalVal = currentBrightnessRef.current;
+            updateHardwareBrightness(finalVal);
+            onBrightnessCompleteRef.current?.(finalVal);
           } else if (activeGestureTypeRef.current === 'volume') {
-            onVolumeChangeRef.current?.(currentVolumeRef.current);
+            const finalVal = currentVolumeRef.current;
+            updateHardwareVolume(finalVal);
+            onVolumeCompleteRef.current?.(finalVal);
           }
+
           if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
           hideTimerRef.current = setTimeout(() => {
             setGestureType(null);
-          }, 800);
+          }, 700);
           return;
         }
 
-        // Distinguish single vs double tap
+        // Tap handling (distinguish single vs double tap)
         const now = Date.now();
         const touchX = evt.nativeEvent.pageX;
         const timeDiff = now - lastTapRef.current.time;
         const distDiff = Math.abs(touchX - lastTapRef.current.x);
-        const { width: screenWidth } = Dimensions.get('window');
+        const screenWidth = screenWidthRef.current;
 
         if (timeDiff < 320 && distDiff < 60) {
           // Double Tap detected
@@ -278,7 +337,7 @@ const GestureOverlayComponent: React.FC<GestureOverlayProps> = ({
           tapTimeoutRef.current = setTimeout(() => {
             onSingleTapRef.current?.();
             tapTimeoutRef.current = null;
-          }, 300);
+          }, 280);
         }
       },
       onPanResponderTerminate: () => {
@@ -297,7 +356,6 @@ const GestureOverlayComponent: React.FC<GestureOverlayProps> = ({
         ]}
         testID="locked-overlay"
       >
-        {/* Full-screen backdrop to intercept, absorb, and block all touches/gestures */}
         <Pressable
           style={StyleSheet.absoluteFill}
           onPress={handleBackdropTap}
@@ -325,6 +383,19 @@ const GestureOverlayComponent: React.FC<GestureOverlayProps> = ({
 
   return (
     <>
+      {/* Dynamic Brightness Dimming Scrim (renders at 60fps without parent re-renders) */}
+      <View
+        style={[
+          StyleSheet.absoluteFill,
+          {
+            backgroundColor: '#000000',
+            opacity: Math.max(0, Math.min(0.75, (1 - displayBrightness) * 0.75)),
+            zIndex: 1,
+          },
+        ]}
+        pointerEvents="none"
+      />
+
       {/* 1. Underlying touch interception layer (zIndex 10) */}
       <View
         style={styles.touchLayer}
@@ -334,7 +405,7 @@ const GestureOverlayComponent: React.FC<GestureOverlayProps> = ({
 
       {/* 2. Floating HUD overlay above controls (zIndex 35, pointerEvents="none") */}
       <View style={styles.hudOverlay} pointerEvents="none">
-        {/* Right-side Volume HUD (Never collides with center play/pause) */}
+        {/* Right-side Volume HUD */}
         {activeGestureType === 'volume' && (
           <View
             style={[
@@ -354,7 +425,7 @@ const GestureOverlayComponent: React.FC<GestureOverlayProps> = ({
               )}
             </View>
 
-            {/* Vertical Level Progress Bar (Fills upwards from bottom) */}
+            {/* Vertical Level Progress Bar */}
             <View style={styles.progressBarTrack}>
               <View
                 style={[
@@ -442,147 +513,126 @@ export const GestureOverlay = React.memo(GestureOverlayComponent);
 
 const styles = StyleSheet.create({
   touchLayer: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
+    ...StyleSheet.absoluteFill,
     zIndex: 10,
   },
   hudOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
+    ...StyleSheet.absoluteFill,
     zIndex: 35,
     justifyContent: 'center',
+    alignItems: 'center',
+  },
+  sideHud: {
+    position: 'absolute',
+    top: '25%',
+    bottom: '25%',
+    width: 50,
+    backgroundColor: 'rgba(15, 23, 42, 0.90)',
+    borderRadius: borderRadius.lg,
+    paddingVertical: spacing.md,
+    paddingHorizontal: spacing.xs,
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.12)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.35,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  brightnessHud: {
+    left: spacing.lg,
+  },
+  brightnessHudLandscape: {
+    left: spacing.xl,
+  },
+  volumeHud: {
+    right: spacing.lg,
+  },
+  volumeHudLandscape: {
+    right: spacing.xl,
+  },
+  hudIconContainer: {
+    width: 32,
+    height: 32,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  progressBarTrack: {
+    flex: 1,
+    width: 6,
+    backgroundColor: 'rgba(255, 255, 255, 0.18)',
+    borderRadius: borderRadius.full,
+    marginVertical: spacing.sm,
+    justifyContent: 'flex-end',
+    overflow: 'hidden',
+  },
+  progressBarFill: {
+    width: '100%',
+    borderRadius: borderRadius.full,
+  },
+  hudPercentageText: {
+    ...typography.caption,
+    color: palette.white,
+    fontWeight: '700',
+    fontSize: 11,
+    textAlign: 'center',
+  },
+  skipBadge: {
+    position: 'absolute',
+    backgroundColor: 'rgba(15, 23, 42, 0.85)',
+    borderRadius: borderRadius.full,
+    padding: spacing.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
+  },
+  skipLeft: {
+    left: '18%',
+  },
+  skipLeftLandscape: {
+    left: '22%',
+  },
+  skipRight: {
+    right: '18%',
+  },
+  skipRightLandscape: {
+    right: '22%',
+  },
+  skipText: {
+    ...typography.bodySmall,
+    color: palette.white,
+    fontWeight: '700',
+    marginTop: spacing.xs,
   },
   lockedContainer: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
+    ...StyleSheet.absoluteFill,
     zIndex: 40,
-    justifyContent: 'flex-start',
     alignItems: 'center',
-    paddingTop: 48,
   },
   unlockButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(15, 23, 42, 0.88)',
+    backgroundColor: 'rgba(15, 23, 42, 0.85)',
+    paddingVertical: spacing.sm,
     paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
     borderRadius: borderRadius.full,
-    borderWidth: 1.5,
-    borderColor: 'rgba(255, 255, 255, 0.25)',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.4,
-    shadowRadius: 8,
-    elevation: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
   },
   unlockButtonHighlight: {
     borderColor: palette.accentCyan,
-    backgroundColor: 'rgba(15, 23, 42, 0.95)',
-    transform: [{ scale: 1.04 }],
+    backgroundColor: 'rgba(14, 165, 233, 0.25)',
   },
   unlockText: {
-    ...typography.bodyMedium,
+    ...typography.bodySmall,
     color: palette.white,
     fontWeight: '600',
     marginLeft: spacing.sm,
   },
   unlockTextHighlight: {
     color: palette.accentCyan,
-  },
-  sideHud: {
-    position: 'absolute',
-    top: '28%',
-    backgroundColor: 'rgba(15, 23, 42, 0.92)',
-    borderRadius: borderRadius.xl,
-    paddingVertical: spacing.md,
-    paddingHorizontal: spacing.xs,
-    alignItems: 'center',
-    justifyContent: 'center',
-    width: 48,
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.15)',
-    shadowColor: '#000000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.35,
-    shadowRadius: 8,
-    elevation: 8,
-  },
-  volumeHud: {
-    right: 20,
-  },
-  volumeHudLandscape: {
-    right: 72,
-  },
-  brightnessHud: {
-    left: 20,
-  },
-  brightnessHudLandscape: {
-    left: 72,
-  },
-  hudIconContainer: {
-    marginBottom: spacing.xs,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  progressBarTrack: {
-    width: 6,
-    height: 84,
-    backgroundColor: 'rgba(255, 255, 255, 0.22)',
-    borderRadius: 3,
-    overflow: 'hidden',
-    justifyContent: 'flex-end', // Fills vertically upwards
-    marginVertical: spacing.xs,
-  },
-  progressBarFill: {
-    width: '100%',
-    borderRadius: 3,
-  },
-  hudPercentageText: {
-    ...typography.caption,
-    color: palette.white,
-    fontWeight: '700',
-    fontSize: 10,
-    marginTop: spacing.xs,
-    textAlign: 'center',
-  },
-  skipBadge: {
-    position: 'absolute',
-    top: '38%',
-    backgroundColor: 'rgba(0, 0, 0, 0.75)',
-    paddingHorizontal: spacing.lg,
-    paddingVertical: spacing.md,
-    borderRadius: borderRadius.full,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.2)',
-  },
-  skipLeft: {
-    left: '12%',
-  },
-  skipLeftLandscape: {
-    left: '20%',
-  },
-  skipRight: {
-    right: '12%',
-  },
-  skipRightLandscape: {
-    right: '20%',
-  },
-  skipText: {
-    ...typography.caption,
-    color: palette.white,
-    marginTop: 4,
-    fontWeight: '700',
-    fontSize: 12,
   },
 });

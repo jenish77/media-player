@@ -11,6 +11,7 @@ import {
   StatusBar,
   Alert,
   Platform,
+  RefreshControl,
 } from 'react-native';
 import { Image } from 'expo-image';
 import {
@@ -27,8 +28,12 @@ import { useLibraryStore } from '../../store/useLibraryStore';
 import { usePlaybackStore } from '../../store/usePlaybackStore';
 import { VideoCard } from '../../components/VideoCard';
 import { EmptyState } from '../../components/EmptyState';
-import { pickVideoFromDocumentPicker } from '../../services/mediaDiscovery/mediaDiscoveryService';
+import {
+  pickVideoFromDocumentPicker,
+  pickFolderFromDirectoryPicker,
+} from '../../services/mediaDiscovery/mediaDiscoveryService';
 import { isImageUri, isSupportedThumbnailUri, preloadThumbnails } from '../../services/thumbnailService';
+import { preloadDurations } from '../../services/metadataService';
 import { MediaItem } from '../../types/media';
 import { palette, darkTheme } from '../../theme/colors';
 import { typography } from '../../theme/typography';
@@ -68,11 +73,22 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({ navigation }) => {
   const [showSortMenu, setShowSortMenu] = useState(false);
 
   useEffect(() => {
-    loadLibrary();
+    const initializeLibrary = async () => {
+      await loadLibrary();
+      // Automatically detect and scan device videos on launch
+      try {
+        await scanMedia();
+      } catch (e) {
+        console.log('[LibraryScreen] Automatic initial scan:', e);
+      }
+    };
+    initializeLibrary();
+
     const unsubscribe = navigation.addListener('focus', () => {
       if (ScreenOrientation?.lockAsync) {
         ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
       }
+      loadLibrary();
     });
     return unsubscribe;
   }, [navigation]);
@@ -80,6 +96,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({ navigation }) => {
   useEffect(() => {
     if (mediaItems.length > 0) {
       preloadThumbnails(mediaItems, 24);
+      preloadDurations(mediaItems, 24);
     }
   }, [mediaItems]);
 
@@ -117,38 +134,64 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({ navigation }) => {
   };
 
   const handleScan = async () => {
-    if (isExpoGo && Platform.OS === 'android') {
-      Alert.alert(
-        'Expo Go Testing Mode',
-        'Android 13+ restricts automated gallery scanning inside Expo Go.\n\nTap "Open Video File" to browse and select any video directly from your device storage.',
-        [
-          { text: 'Cancel', style: 'cancel' },
-          {
-            text: 'Open Video File',
-            onPress: handleOpenDocument,
-          },
-        ]
-      );
-      return;
-    }
-
     try {
       const res = await scanMedia();
-      if (res && res.errors && res.errors.length > 0 && res.addedCount === 0) {
+      if (res && res.addedCount > 0) {
+        Alert.alert('Scan Complete', `Discovered and added ${res.addedCount} new video(s) to your library.`);
+      } else if (res && res.errors && res.errors.length > 0 && res.addedCount === 0) {
         Alert.alert(
-          'Media Access Required',
-          `${res.errors[0]}.\n\nPlease ensure Nova Player has permission to access video files in your device Settings, or tap the folder icon to open any video directly.`
+          'Media Discovery',
+          `${res.errors[0]}`,
+          [
+            { text: 'OK' },
+            ...(Platform.OS === 'android'
+              ? [
+                  {
+                    text: 'Select Video Folder',
+                    onPress: handleOpenFolder,
+                  },
+                ]
+              : []),
+          ]
         );
-      } else if (res && res.addedCount > 0) {
-        Alert.alert('Scan Complete', `Discovered and added ${res.addedCount} video(s) to your library.`);
       } else {
         Alert.alert(
           'Scan Complete',
-          'No new video files were found on device storage.\n\nTip: You can use the Folder icon (top-right) to browse and open videos from any directory or SD card.'
+          'Library is up to date. No new video files found on device storage.\n\nTip: You can use the Folder icon (top-right) to browse or auto-scan any folder.'
         );
       }
     } catch (e: any) {
       Alert.alert('Scan Error', e?.message || 'Failed to scan videos.');
+    }
+  };
+
+  const handleOpenFolder = async () => {
+    try {
+      const res = await pickFolderFromDirectoryPicker();
+      if (res && res.addedCount > 0) {
+        await loadLibrary();
+        Alert.alert('Folder Added', `Discovered and added ${res.addedCount} video(s) from selected folder.`);
+      }
+    } catch (err: any) {
+      Alert.alert('Folder Error', err?.message || 'Failed to select folder');
+    }
+  };
+
+  const handleOpenFolderMenu = () => {
+    if (Platform.OS === 'android') {
+      Alert.alert('Add Videos', 'Choose how you want to add videos:', [
+        {
+          text: 'Open Video File(s)',
+          onPress: handleOpenDocument,
+        },
+        {
+          text: 'Select Video Folder (Auto-Scan)',
+          onPress: handleOpenFolder,
+        },
+        { text: 'Cancel', style: 'cancel' },
+      ]);
+    } else {
+      handleOpenDocument();
     }
   };
 
@@ -188,7 +231,7 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({ navigation }) => {
 
             <TouchableOpacity
               style={styles.headerButton}
-              onPress={handleOpenDocument}
+              onPress={handleOpenFolderMenu}
               testID="open-file-button"
             >
               <FolderOpen size={20} color={palette.accentCyan} />
@@ -269,6 +312,16 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({ navigation }) => {
         numColumns={viewLayout === 'grid' ? 2 : 1}
         keyExtractor={(item) => item.id}
         contentContainerStyle={styles.listContent}
+        refreshControl={
+          <RefreshControl
+            refreshing={isScanning}
+            onRefresh={async () => {
+              await scanMedia();
+            }}
+            tintColor={palette.accentCyan}
+            colors={[palette.accentCyan]}
+          />
+        }
         ListHeaderComponent={
           <>
             {/* Continue Watching Section */}
@@ -356,14 +409,14 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({ navigation }) => {
               searchQuery
                 ? undefined
                 : isExpoGo
-                ? 'Open Video File'
+                ? 'Add Videos'
                 : 'Scan Videos'
             }
             onAction={
               searchQuery
                 ? undefined
                 : isExpoGo
-                ? handleOpenDocument
+                ? handleOpenFolderMenu
                 : handleScan
             }
             isLoading={isScanning}

@@ -100,7 +100,7 @@ function BottomTabs({ navigation }: any) {
     if (Platform.OS === 'android') {
       try {
         const navBar = require('expo-navigation-bar');
-        navBar?.setStyle?.('dark');
+        navBar?.setStyle?.('light');
         navBar?.setHidden?.(false);
       } catch (e) {}
     }

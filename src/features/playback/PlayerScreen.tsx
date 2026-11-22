@@ -52,8 +52,8 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ navigation, route })
   const currentMedia = usePlaybackStore((s) => s.currentMedia);
   const nativePlayer = usePlaybackStore((s) => s.nativePlayer);
   const playbackRate = usePlaybackStore((s) => s.playbackRate);
-  const volume = usePlaybackStore((s) => s.volume);
-  const brightness = usePlaybackStore((s) => s.brightness);
+  const initialVolume = useRef(usePlaybackStore.getState().volume).current;
+  const initialBrightness = useRef(usePlaybackStore.getState().brightness).current;
   const aspectRatio = usePlaybackStore((s) => s.aspectRatio);
   const isLocked = usePlaybackStore((s) => s.isLocked);
   const areControlsVisible = usePlaybackStore((s) => s.areControlsVisible);
@@ -387,11 +387,27 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ navigation, route })
   }, []);
 
   const handleBrightnessChange = useCallback((newBrightness: number) => {
-    usePlaybackStore.getState().setBrightness(newBrightness);
+    try {
+      if (BrightnessModule?.setBrightnessAsync) {
+        BrightnessModule.setBrightnessAsync(newBrightness).catch(() => {});
+      }
+    } catch (e) {}
   }, []);
 
   const handleVolumeChange = useCallback((newVolume: number) => {
-    usePlaybackStore.getState().setVolume(newVolume);
+    try {
+      if (nativePlayer) {
+        nativePlayer.volume = newVolume;
+      }
+    } catch (e) {}
+  }, [nativePlayer]);
+
+  const handleBrightnessComplete = useCallback((finalBrightness: number) => {
+    usePlaybackStore.getState().setBrightness(finalBrightness);
+  }, []);
+
+  const handleVolumeComplete = useCallback((finalVolume: number) => {
+    usePlaybackStore.getState().setVolume(finalVolume);
   }, []);
 
   const handleOpenTracksSheet = useCallback(() => {
@@ -425,17 +441,6 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ navigation, route })
         )}
       </View>
 
-      {/* Screen Brightness Dimming Scrim Layer */}
-      <View
-        style={[
-          styles.brightnessScrim,
-          {
-            opacity: Math.max(0, Math.min(0.75, (1 - brightness) * 0.75)),
-          },
-        ]}
-        pointerEvents="none"
-      />
-
       {/* Subtitle Rendering Overlay */}
       <SubtitleOverlay
         cues={subtitleCues}
@@ -455,8 +460,10 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ navigation, route })
         onDoubleTapRight={handleSkipForward}
         onBrightnessChange={handleBrightnessChange}
         onVolumeChange={handleVolumeChange}
-        currentBrightness={brightness}
-        currentVolume={volume}
+        onBrightnessComplete={handleBrightnessComplete}
+        onVolumeComplete={handleVolumeComplete}
+        currentBrightness={initialBrightness}
+        currentVolume={initialVolume}
         skipSeconds={skipSeconds}
         gesturesEnabled={settings.gesturesEnabled}
         doubleTapSeekEnabled={settings.doubleTapSeekEnabled}

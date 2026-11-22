@@ -25,9 +25,10 @@ interface AppProviderProps {
 export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
   const [isReady, setIsReady] = useState(false);
   const { loadSettings } = useSettingsStore();
-  const { pause, state, currentMedia, currentTimeMs } = usePlaybackStore();
 
   useEffect(() => {
+    let mounted = true;
+
     async function initializeApp() {
       try {
         await getDatabase();
@@ -40,37 +41,41 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           console.warn('Initial permission check error:', permErr);
         }
 
-        // Initialize Google Mobile Ads SDK in native build
+        // Initialize Google Mobile Ads SDK in native build (non-blocking)
         if (!isExpoGo && mobileAds) {
-          try {
-            await mobileAds().initialize();
-          } catch (adsErr) {
-            console.warn('AdMob initialize warning:', adsErr);
-          }
+          // Fire and forget — don't block app startup on ad initialization
+          mobileAds()
+            .initialize()
+            .catch((adsErr: any) => {
+              console.warn('AdMob initialize warning:', adsErr);
+            });
         }
       } catch (err) {
         console.warn('Initialization warning:', err);
       } finally {
-        setIsReady(true);
+        if (mounted) setIsReady(true);
       }
     }
 
     initializeApp();
 
     // App state listener to handle backgrounding / pause / persist
+    // Read state directly from the store to avoid stale closure
     const subscription = AppState.addEventListener('change', (nextAppState: AppStateStatus) => {
       if (nextAppState.match(/inactive|background/)) {
         playbackPersistence.flush();
-        if (state === 'playing') {
-          pause();
+        const currentState = usePlaybackStore.getState();
+        if (currentState.state === 'playing') {
+          currentState.pause();
         }
       }
     });
 
     return () => {
+      mounted = false;
       subscription.remove();
     };
-  }, [state]);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!isReady) {
     return (

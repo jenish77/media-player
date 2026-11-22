@@ -1,14 +1,16 @@
 import { Platform } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { MediaItem, SourceType } from '../../types/media';
 import { extractFileName, extractFileExtension, extractFolderName, getContainerFromExtension } from '../../utils/pathUtils';
 import { resolveStableUri } from '../../utils/uriResolver';
-import { upsertMediaItemsBatch, upsertMediaItem } from '../database/mediaRepository';
-import { isImageUri, isSupportedThumbnailUri } from '../thumbnailService';
+import { upsertMediaItemsBatch } from '../database/mediaRepository';
+import { isSupportedThumbnailUri } from '../thumbnailService';
 import { isExpoGo } from '../../utils/environment';
 
 let LegacyMediaLibrary: any = null;
 let ModernMediaLibrary: any = null;
 let DocumentPicker: any = null;
+let FileSystem: any = null;
 
 try {
   LegacyMediaLibrary = require('expo-media-library/legacy');
@@ -16,11 +18,17 @@ try {
 
 try {
   ModernMediaLibrary = require('expo-media-library');
-} catch (e3) {}
+} catch (e2) {}
 
 try {
   DocumentPicker = require('expo-document-picker');
+} catch (e3) {}
+
+try {
+  FileSystem = require('expo-file-system');
 } catch (e4) {}
+
+const SAF_FOLDERS_STORAGE_KEY = 'nova_saf_directories_v1';
 
 export interface ScanResult {
   addedCount: number;
@@ -30,79 +38,165 @@ export interface ScanResult {
 
 /**
  * Checks and requests video media library permissions.
+ * In Expo Go on Android, expo-media-library intentionally rejects VIDEO/PHOTO
+ * granular permissions (only AUDIO is allowed). We detect this and return false
+ * gracefully so the UI can offer the file/folder picker instead.
  */
 export async function requestMediaPermissions(): Promise<boolean> {
-  const lib = LegacyMediaLibrary || ModernMediaLibrary;
-  if (!lib) return false;
-
-  // In Expo Go on Android, accessing the native media library for videos is restricted by Expo Go.
-  // Return false cleanly without triggering unhandled native permission errors.
+  // In Expo Go on Android, expo-media-library blocks VIDEO permissions internally.
+  // Skip the doomed request to avoid noisy error logs and misleading permission dialogs.
   if (isExpoGo && Platform.OS === 'android') {
+    console.log('[Permissions] Expo Go detected – skipping MediaLibrary permission request (blocked by Expo Go runtime). Use file/folder picker instead.');
     return false;
   }
 
+  const lib = LegacyMediaLibrary || ModernMediaLibrary;
+  if (!lib) return false;
+
   const isGranted = (p: any) =>
-    !!p &&
-    (p.granted === true ||
-      p.status === 'granted' ||
-      p.accessPrivileges === 'all' ||
-      p.accessPrivileges === 'limited');
+    Boolean(
+      p &&
+      (p.granted === true ||
+        p.status === 'granted' ||
+        p.accessPrivileges === 'all' ||
+        p.accessPrivileges === 'limited')
+    );
 
+  // Strategy 1: Android 13+ granular permission for video
   try {
-    let perm: any = null;
     if (typeof lib.getPermissionsAsync === 'function') {
-      try {
-        perm = await lib.getPermissionsAsync(false, ['video']);
-      } catch (e) {}
-    }
+      const perm = await lib.getPermissionsAsync(false, ['video']);
+      if (isGranted(perm)) return true;
 
-    if (isGranted(perm)) {
-      return true;
+      if (perm?.canAskAgain !== false && typeof lib.requestPermissionsAsync === 'function') {
+        const req = await lib.requestPermissionsAsync(false, ['video']);
+        if (isGranted(req)) return true;
+      }
     }
+  } catch (e1) {}
 
-    if (perm?.canAskAgain !== false && typeof lib.requestPermissionsAsync === 'function') {
-      let req: any = null;
-      try {
-        req = await lib.requestPermissionsAsync(false, ['video']);
-      } catch (e) {}
-      return isGranted(req);
+  // Strategy 2: Standard non-granular permission (Android <= 12 or iOS)
+  try {
+    if (typeof lib.getPermissionsAsync === 'function') {
+      const perm = await lib.getPermissionsAsync(false);
+      if (isGranted(perm)) return true;
+
+      if (perm?.canAskAgain !== false && typeof lib.requestPermissionsAsync === 'function') {
+        const req = await lib.requestPermissionsAsync(false);
+        if (isGranted(req)) return true;
+      }
     }
+  } catch (e2) {}
 
-    return false;
-  } catch (err) {
-    console.warn('Failed to check media permissions:', err);
-    return false;
+  // Strategy 3: Modern MediaLibrary next module
+  try {
+    if (ModernMediaLibrary?.getPermissionsAsync) {
+      const perm = await ModernMediaLibrary.getPermissionsAsync(false, ['video']);
+      if (isGranted(perm)) return true;
+    }
+  } catch (e3) {}
+
+  return false;
+}
+
+/**
+ * Retrieves list of persistent SAF folder URIs saved by the user.
+ */
+export async function getSavedSafDirectories(): Promise<string[]> {
+  try {
+    const raw = await AsyncStorage.getItem(SAF_FOLDERS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (e) {
+    return [];
   }
 }
 
 /**
- * Scans local device media (Android MediaStore / iOS Photos) for video assets.
+ * Saves a new SAF folder URI for persistent automatic scanning.
+ */
+export async function saveSafDirectory(dirUri: string): Promise<void> {
+  try {
+    const existing = await getSavedSafDirectories();
+    if (!existing.includes(dirUri)) {
+      existing.push(dirUri);
+      await AsyncStorage.setItem(SAF_FOLDERS_STORAGE_KEY, JSON.stringify(existing));
+    }
+  } catch (e) {
+    console.warn('Failed to save SAF directory:', e);
+  }
+}
+
+/**
+ * Scans saved persistent Storage Access Framework (SAF) directories for videos.
+ */
+export async function scanPersistentSafDirectories(): Promise<any[]> {
+  const assets: any[] = [];
+  if (Platform.OS !== 'android') return assets;
+
+  try {
+    const SAF = FileSystem?.StorageAccessFramework || require('expo-file-system/legacy')?.StorageAccessFramework;
+    if (!SAF || typeof SAF.readDirectoryAsync !== 'function') return assets;
+
+    const directories = await getSavedSafDirectories();
+    const videoExts = ['.mp4', '.mkv', '.webm', '.avi', '.mov', '.flv', '.ts', '.3gp'];
+
+    for (const dirUri of directories) {
+      try {
+        const fileUris: string[] = await SAF.readDirectoryAsync(dirUri);
+        for (const fileUri of fileUris) {
+          const lower = fileUri.toLowerCase();
+          const isVideo = videoExts.some((ext) => lower.includes(ext) || lower.endsWith(ext));
+          if (!isVideo) continue;
+
+          let filename = decodeURIComponent(fileUri.split('%2F').pop() || fileUri.split('/').pop() || 'video.mp4');
+          if (filename.includes(':')) {
+            filename = filename.split(':').pop() || filename;
+          }
+
+          assets.push({
+            id: `saf_${encodeURIComponent(fileUri).slice(-16)}`,
+            uri: fileUri,
+            filename,
+            duration: 0,
+            creationTime: Date.now(),
+          });
+        }
+      } catch (dirErr) {
+        console.warn(`Failed to read SAF directory ${dirUri}:`, dirErr);
+      }
+    }
+  } catch (err) {
+    console.warn('scanPersistentSafDirectories error:', err);
+  }
+
+  return assets;
+}
+
+/**
+ * Scans local device media (Android MediaStore / iOS Photos / SAF Directories) for video assets.
+ * Automatically runs on app launch, refresh, and manual scan.
  */
 export async function scanDeviceVideos(): Promise<ScanResult> {
   const result: ScanResult = { addedCount: 0, totalFound: 0, errors: [] };
-
   const lib = LegacyMediaLibrary || ModernMediaLibrary;
-  if (!lib) {
-    result.errors.push('MediaLibrary native module unavailable');
-    return result;
-  }
 
-  const hasPermission = await requestMediaPermissions();
-  if (!hasPermission) {
-    if (isExpoGo && Platform.OS === 'android') {
-      result.errors.push(
-        'Expo Go limits automated gallery scanning on Android.\nPlease use the Folder icon (top right) or "Import Videos" to select videos directly from your storage.'
-      );
-    } else {
-      result.errors.push('Media permission was denied. Please grant Video/Media permissions to Nova Player in Android Settings.');
-    }
-    return result;
-  }
-
+  let hasPermission = false;
   try {
-    let rawAssets: any[] = [];
+    hasPermission = await requestMediaPermissions();
+  } catch (e) {
+    console.warn('Permission query warning:', e);
+  }
 
-    // Attempt 1: LegacyMediaLibrary.getAssetsAsync (Expo SDK legacy package)
+  let rawAssets: any[] = [];
+
+  // In Expo Go on Android, MediaLibrary scanning is blocked.
+  // Skip directly to SAF folder scanning to avoid error noise.
+  if (isExpoGo && Platform.OS === 'android') {
+    console.log('[scanDeviceVideos] Expo Go detected – skipping MediaLibrary scan, checking SAF folders only.');
+  } else if (lib) {
+    // Attempt 1: LegacyMediaLibrary.getAssetsAsync
     if (LegacyMediaLibrary && typeof LegacyMediaLibrary.getAssetsAsync === 'function') {
       try {
         const legacyRes = await LegacyMediaLibrary.getAssetsAsync({
@@ -116,7 +210,7 @@ export async function scanDeviceVideos(): Promise<ScanResult> {
           rawAssets = legacyRes.assets;
         }
       } catch (legacyErr: any) {
-        console.warn('LegacyMediaLibrary.getAssetsAsync failed, trying Query API:', legacyErr?.message);
+        console.log('LegacyMediaLibrary scan attempt:', legacyErr?.message);
       }
     }
 
@@ -159,17 +253,15 @@ export async function scanDeviceVideos(): Promise<ScanResult> {
                 height,
                 creationTime,
               });
-            } catch (itemErr) {
-              console.warn('Failed to parse query asset:', itemErr);
-            }
+            } catch (itemErr) {}
           }
         }
       } catch (queryErr: any) {
-        console.warn('ModernMediaLibrary.Query failed:', queryErr?.message);
+        console.log('ModernMediaLibrary.Query scan attempt:', queryErr?.message);
       }
     }
 
-    // Attempt 3: Direct lib.getAssetsAsync fallback (for Jest mocks and standard environments)
+    // Attempt 3: Direct lib.getAssetsAsync fallback
     if (rawAssets.length === 0 && typeof lib.getAssetsAsync === 'function') {
       try {
         const fallbackRes = await lib.getAssetsAsync({
@@ -180,76 +272,120 @@ export async function scanDeviceVideos(): Promise<ScanResult> {
           rawAssets = fallbackRes.assets;
         }
       } catch (directErr: any) {
-        console.warn('Direct getAssetsAsync failed:', directErr?.message);
+        console.log('Direct getAssetsAsync scan attempt:', directErr?.message);
       }
     }
+  }
 
-    const now = Date.now();
-    const mediaItems: MediaItem[] = [];
+  // Also scan persistent SAF folders
+  try {
+    const safAssets = await scanPersistentSafDirectories();
+    if (safAssets.length > 0) {
+      rawAssets.push(...safAssets);
+    }
+  } catch (safErr) {}
 
-    for (const asset of rawAssets) {
-      if (!asset.uri) continue;
-      const filename = asset.filename || extractFileName(asset.uri);
-      const ext = extractFileExtension(filename);
-      const container = getContainerFromExtension(ext);
-      const sourceType: SourceType = Platform.OS === 'android' ? 'android_mediastore' : 'ios_photos';
+  // If no assets were found and permission was not granted
+  if (rawAssets.length === 0 && !hasPermission) {
+    if (isExpoGo && Platform.OS === 'android') {
+      result.errors.push(
+        'Automated gallery scanning is restricted in the Expo Go client.\nTap the Folder icon (top right) to select a video folder to auto-scan or pick video files directly.'
+      );
+    } else {
+      result.errors.push(
+        'Media permission was not granted. Please allow Video permissions in Android Settings.'
+      );
+    }
+    return result;
+  }
 
-      // Set thumbnailUri:
-      // 1. Explicit asset.thumbnailUri if valid
-      // 2. iOS PhotoKit: ph://... (expo-image renders directly)
-      // 3. Android MediaStore: content://media/external/video/media/{id}/thumbnail or asset.uri
-      let safeThumbnailUri: string | null = null;
-      if (asset.thumbnailUri && isSupportedThumbnailUri(asset.thumbnailUri)) {
-        safeThumbnailUri = asset.thumbnailUri;
-      } else if (asset.uri && asset.uri.startsWith('ph://')) {
+  const now = Date.now();
+  const mediaItems: MediaItem[] = [];
+
+  for (const asset of rawAssets) {
+    if (!asset.uri) continue;
+    const filename = asset.filename || extractFileName(asset.uri);
+    const ext = extractFileExtension(filename);
+    const container = getContainerFromExtension(ext);
+    const sourceType: SourceType = Platform.OS === 'android' ? 'android_mediastore' : 'ios_photos';
+
+    let safeThumbnailUri: string | null = null;
+    if (asset.thumbnailUri && isSupportedThumbnailUri(asset.thumbnailUri)) {
+      safeThumbnailUri = asset.thumbnailUri;
+    } else if (asset.uri && asset.uri.startsWith('ph://')) {
+      safeThumbnailUri = asset.uri;
+    } else if (Platform.OS === 'android') {
+      if (asset.id && !isNaN(Number(asset.id))) {
+        safeThumbnailUri = `content://media/external/video/media/${asset.id}/thumbnail`;
+      } else if (asset.uri && (asset.uri.startsWith('content://') || asset.uri.startsWith('file://'))) {
         safeThumbnailUri = asset.uri;
-      } else if (Platform.OS === 'android') {
-        if (asset.id && !isNaN(Number(asset.id))) {
-          safeThumbnailUri = `content://media/external/video/media/${asset.id}/thumbnail`;
-        } else if (asset.uri && (asset.uri.startsWith('content://') || asset.uri.startsWith('file://'))) {
-          safeThumbnailUri = asset.uri;
-        }
       }
-
-      mediaItems.push({
-        id: `media_${asset.id || Math.random().toString(36).substring(2, 9)}`,
-        sourceType,
-        sourceReference: resolveStableUri(asset.uri),
-        displayName: filename,
-        durationMs: asset.duration ? Math.round(asset.duration * 1000) : null,
-        sizeBytes: null,
-        width: asset.width || null,
-        height: asset.height || null,
-        mimeType: ext ? `video/${ext}` : 'video/*',
-        container,
-        dateAdded: asset.creationTime ? asset.creationTime * (asset.creationTime < 1e11 ? 1000 : 1) : now,
-        lastSeenAt: now,
-        availabilityStatus: 'available',
-        thumbnailStatus: safeThumbnailUri ? 'ready' : 'none',
-        thumbnailUri: safeThumbnailUri,
-        lastPositionMs: 0,
-        lastPlayedAt: null,
-        isFavorite: false,
-        folderName: extractFolderName(asset.uri),
-        createdAt: now,
-        updatedAt: now,
-      });
     }
 
-    if (mediaItems.length > 0) {
-      await upsertMediaItemsBatch(mediaItems);
-      result.addedCount = mediaItems.length;
-      result.totalFound = mediaItems.length;
-    }
-  } catch (err: any) {
-    result.errors.push(err?.message || 'Error occurred while scanning device videos');
+    mediaItems.push({
+      id: `media_${asset.id || Math.random().toString(36).substring(2, 9)}`,
+      sourceType,
+      sourceReference: resolveStableUri(asset.uri),
+      displayName: filename,
+      durationMs: asset.duration ? Math.round(asset.duration * 1000) : null,
+      sizeBytes: null,
+      width: asset.width || null,
+      height: asset.height || null,
+      mimeType: ext ? `video/${ext}` : 'video/*',
+      container,
+      dateAdded: asset.creationTime ? asset.creationTime * (asset.creationTime < 1e11 ? 1000 : 1) : now,
+      lastSeenAt: now,
+      availabilityStatus: 'available',
+      thumbnailStatus: safeThumbnailUri ? 'ready' : 'none',
+      thumbnailUri: safeThumbnailUri,
+      lastPositionMs: 0,
+      lastPlayedAt: null,
+      isFavorite: false,
+      folderName: extractFolderName(asset.uri),
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  if (mediaItems.length > 0) {
+    await upsertMediaItemsBatch(mediaItems);
+    result.addedCount = mediaItems.length;
+    result.totalFound = mediaItems.length;
   }
 
   return result;
 }
 
 /**
- * Opens system document picker to select an external video or subtitle file.
+ * Prompts user to select a folder via Storage Access Framework (SAF) and saves it
+ * for automatic scanning across app restarts.
+ */
+export async function pickFolderFromDirectoryPicker(): Promise<ScanResult> {
+  const result: ScanResult = { addedCount: 0, totalFound: 0, errors: [] };
+  if (Platform.OS !== 'android') return result;
+
+  try {
+    const SAF = FileSystem?.StorageAccessFramework || require('expo-file-system/legacy')?.StorageAccessFramework;
+    if (!SAF || typeof SAF.requestDirectoryPermissionsAsync !== 'function') {
+      result.errors.push('Storage Access Framework is not available on this device');
+      return result;
+    }
+
+    const perm = await SAF.requestDirectoryPermissionsAsync();
+    if (!perm.granted || !perm.directoryUri) {
+      return result;
+    }
+
+    await saveSafDirectory(perm.directoryUri);
+    return await scanDeviceVideos();
+  } catch (err: any) {
+    result.errors.push(err?.message || 'Failed to select folder');
+    return result;
+  }
+}
+
+/**
+ * Opens system document picker to select external video file(s).
  */
 export async function pickVideoFromDocumentPicker(): Promise<MediaItem | null> {
   if (!DocumentPicker) {
@@ -279,11 +415,12 @@ export async function pickVideoFromDocumentPicker(): Promise<MediaItem | null> {
     // In Expo Go on Android, guarantee a direct file:// cache URI for ExoPlayer
     if (isExpoGo && Platform.OS === 'android' && !resolvedUri.startsWith('file://')) {
       try {
-        const FileSystem = require('expo-file-system');
         const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
-        const dest = `${FileSystem.cacheDirectory}${Date.now()}_${safeName}`;
-        await FileSystem.copyAsync({ from: resolvedUri, to: dest });
-        resolvedUri = dest;
+        const dest = `${FileSystem?.cacheDirectory || ''}${Date.now()}_${safeName}`;
+        if (FileSystem?.copyAsync) {
+          await FileSystem.copyAsync({ from: resolvedUri, to: dest });
+          resolvedUri = dest;
+        }
       } catch (cacheErr) {
         console.warn('[pickVideoFromDocumentPicker] Cache copy warning:', cacheErr);
       }

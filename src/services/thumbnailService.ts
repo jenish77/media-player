@@ -1,6 +1,6 @@
 import { Platform } from 'react-native';
 import { MediaItem } from '../types/media';
-import { updateThumbnail } from './database/mediaRepository';
+import { updateThumbnail, updateMediaDuration } from './database/mediaRepository';
 
 let ExpoVideo: any = null;
 try {
@@ -175,6 +175,18 @@ export async function getThumbnailForMedia(media: MediaItem): Promise<any> {
 
             if (Array.isArray(results) && results.length > 0) {
               const thumb = results[0];
+
+              // Also capture video duration while player has media loaded
+              if (
+                typeof player.duration === 'number' &&
+                player.duration > 0 &&
+                (!media.durationMs || media.durationMs <= 0)
+              ) {
+                const durMs = Math.round(player.duration * 1000);
+                media.durationMs = durMs;
+                updateMediaDuration(media.id, durMs).catch(() => {});
+              }
+
               if (thumb) {
                 let resolvedThumb: any = thumb;
                 if (typeof thumb === 'string') {

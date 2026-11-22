@@ -17,6 +17,7 @@ import { parseSubtitleFile } from '../utils/subtitleParser';
 import { clamp, validateMediaFile, getPlaybackResumeAction } from '../utils/edgeCaseHandlers';
 import { resolvePlayableUri } from '../utils/uriResolver';
 import { requestMediaPermissions } from '../services/mediaDiscovery/mediaDiscoveryService';
+import { updateMediaDuration } from '../services/database/mediaRepository';
 
 let BrightnessModule: any = null;
 try {
@@ -538,6 +539,10 @@ export const usePlaybackStore = create<PlaybackState>((set, get) => ({
       const media = get().currentMedia;
       if (media && progress.currentTimeMs > 0) {
         playbackPersistence.recordProgress(media.id, progress.currentTimeMs);
+        if (progress.durationMs > 0 && (!media.durationMs || media.durationMs <= 0)) {
+          media.durationMs = progress.durationMs;
+          updateMediaDuration(media.id, progress.durationMs).catch(() => {});
+        }
       }
     });
 
