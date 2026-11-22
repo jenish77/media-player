@@ -5,12 +5,12 @@ import { isExpoGo } from '../utils/environment';
  * AdMob Configuration for Nova Player
  *
  * Reads ad unit keys securely from environment variables (process.env.EXPO_PUBLIC_*).
- * Uses official Google AdMob test IDs in preview / development to prevent policy violations.
+ * Uses official Google AdMob test banner IDs in preview builds to guarantee ad visibility.
  * Uses live production IDs in production EAS builds.
  * Automatically disables ads in Expo Go where native Google Mobile Ads module is unavailable.
  */
 
-// Google official sample test banner unit IDs
+// Google official sample test banner unit IDs (always fill, show "Test Ad" label)
 const TEST_BANNER_ANDROID = 'ca-app-pub-3940256099942544/6300978111';
 const TEST_BANNER_IOS = 'ca-app-pub-3940256099942544/2934735716';
 
@@ -29,9 +29,13 @@ if (!isExpoGo) {
     const adsModule = require('react-native-google-mobile-ads');
     _TestIds = adsModule.TestIds;
     _adsAvailable = true;
+    console.log('[adConfig] ✅ Native ads module loaded successfully');
   } catch (e) {
     _adsAvailable = false;
+    console.warn('[adConfig] ❌ Native ads module NOT available:', e);
   }
+} else {
+  console.log('[adConfig] Expo Go detected — ads disabled');
 }
 
 /** Whether the Google Mobile Ads native module is available in the current environment */
@@ -39,24 +43,26 @@ export const isAdsAvailable = _adsAvailable;
 
 /**
  * Returns the appropriate banner ad unit ID based on platform and environment.
- * Always returns test IDs in __DEV__ mode to comply with Google AdMob policies.
- * In preview builds, uses the test banner unit ID provided in eas.json.
- * In production builds, returns the configured production unit ID.
+ * In __DEV__ mode: returns SDK built-in test IDs.
+ * In release builds: returns the env var value (test banner in preview, real banner in production).
  */
 export function getBannerAdUnitId(): string {
   if (isExpoGo || !_adsAvailable) return '';
 
+  // In dev mode, always use SDK test IDs for safety
   if (__DEV__ && _TestIds?.BANNER) {
+    console.log('[adConfig] __DEV__ mode — using SDK TestIds.BANNER:', _TestIds.BANNER);
     return _TestIds.BANNER;
   }
 
-  return (
-    Platform.select({
-      android: ANDROID_BANNER_ID,
-      ios: IOS_BANNER_ID,
-      default: '',
-    }) ?? ''
-  );
+  const unitId = Platform.select({
+    android: ANDROID_BANNER_ID,
+    ios: IOS_BANNER_ID,
+    default: '',
+  }) ?? '';
+
+  console.log('[adConfig] Release mode — banner unitId:', unitId);
+  return unitId;
 }
 
 /**

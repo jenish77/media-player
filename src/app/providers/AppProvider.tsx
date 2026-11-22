@@ -46,13 +46,22 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           try {
             const instance = typeof mobileAds === 'function' ? mobileAds() : mobileAds;
             if (instance && typeof instance.initialize === 'function') {
-              instance.initialize().catch((adsErr: any) => {
-                console.warn('AdMob initialize warning:', adsErr);
-              });
+              console.log('[AppProvider] Initializing AdMob SDK...');
+              instance.initialize()
+                .then(() => {
+                  console.log('[AppProvider] ✅ AdMob SDK initialized successfully');
+                })
+                .catch((adsErr: any) => {
+                  console.warn('[AppProvider] ❌ AdMob initialize error:', adsErr);
+                });
+            } else {
+              console.warn('[AppProvider] AdMob instance missing initialize method');
             }
           } catch (adsErr) {
-            console.warn('AdMob initialize warning:', adsErr);
+            console.warn('[AppProvider] AdMob initialize warning:', adsErr);
           }
+        } else {
+          console.log('[AppProvider] Skipping AdMob init (isExpoGo:', isExpoGo, ', mobileAds available:', !!mobileAds, ')');
         }
       } catch (err) {
         console.warn('Initialization warning:', err);

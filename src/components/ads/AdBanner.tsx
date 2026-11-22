@@ -38,12 +38,13 @@ export function AdBanner({ position = 'bottom' }: AdBannerProps) {
   const [adError, setAdError] = useState(false);
 
   const handleAdLoaded = useCallback(() => {
+    console.log('[AdBanner] ✅ Ad loaded successfully');
     setAdLoaded(true);
     setAdError(false);
   }, []);
 
   const handleAdFailedToLoad = useCallback((error: any) => {
-    // Gracefully handle failed loads (e.g. offline or ad unit propagation delay)
+    console.warn('[AdBanner] ❌ Ad failed to load:', error?.message || error?.code || error);
     setAdError(true);
     setAdLoaded(false);
   }, []);
@@ -54,7 +55,9 @@ export function AdBanner({ position = 'bottom' }: AdBannerProps) {
   }
 
   const adUnitId = getBannerAdUnitId();
+  console.log('[AdBanner] Rendering with unitId:', adUnitId, '| isAdsAvailable:', isAdsAvailable, '| isExpoGo:', isExpoGo);
   if (!adUnitId) {
+    console.warn('[AdBanner] No adUnitId available, returning null');
     return null;
   }
 
