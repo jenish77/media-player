@@ -15,6 +15,7 @@ import { SubtitleOverlay } from '../../components/SubtitleOverlay';
 import { ErrorState } from '../../components/ErrorState';
 import { SubtitleAudioBottomSheet } from '../subtitles/SubtitleAudioBottomSheet';
 import { AspectRatioMode } from '../../types/media';
+import { interstitialAdController } from '../../services/ads/interstitialAdController';
 
 let VideoViewComponent: any = null;
 try {
@@ -98,6 +99,11 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ navigation, route })
   const skipSeconds = settings.defaultSkipIntervalSeconds || 15;
 
   const isExitingRef = useRef(false);
+  const watchStartTimeRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    watchStartTimeRef.current = Date.now();
+  }, []);
 
   const cleanupPlayback = useCallback(async () => {
     try {
@@ -124,14 +130,23 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ navigation, route })
     if (isExitingRef.current) return;
     isExitingRef.current = true;
 
+    const watchDuration =
+      watchStartTimeRef.current !== null ? Date.now() - watchStartTimeRef.current : 0;
+
     try {
       await cleanupPlayback();
     } finally {
-      if (navigation?.canGoBack && navigation.canGoBack()) {
-        navigation.goBack();
-      } else if (navigation?.navigate) {
-        navigation.navigate('MainTabs');
-      }
+      const navigateBack = () => {
+        if (navigation?.canGoBack && navigation.canGoBack()) {
+          navigation.goBack();
+        } else if (navigation?.navigate) {
+          navigation.navigate('MainTabs');
+        }
+      };
+
+      // Show interstitial ad only on exit transition after playback is stopped.
+      // If ad is not ready or frequency cap is active, navigateBack() executes immediately.
+      interstitialAdController.showIfEligible(navigateBack, watchDuration);
     }
   }, [cleanupPlayback, navigation]);
 

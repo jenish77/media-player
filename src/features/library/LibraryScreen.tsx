@@ -26,6 +26,7 @@ import { useLibraryStore } from '../../store/useLibraryStore';
 import { usePlaybackStore } from '../../store/usePlaybackStore';
 import { VideoCard } from '../../components/VideoCard';
 import { EmptyState } from '../../components/EmptyState';
+import { BannerAdView } from '../../components/BannerAdView';
 import { pickVideoFromDocumentPicker } from '../../services/mediaDiscovery/mediaDiscoveryService';
 import { isImageUri, isSupportedThumbnailUri, preloadThumbnails } from '../../services/thumbnailService';
 import { MediaItem } from '../../types/media';
@@ -313,6 +314,9 @@ export const LibraryScreen: React.FC<LibraryScreenProps> = ({ navigation }) => {
           />
         }
       />
+
+      {/* Google AdMob Adaptive Banner */}
+      <BannerAdView />
     </View>
   );
 };

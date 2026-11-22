@@ -138,7 +138,113 @@ jest.mock('expo-video', () => ({
   },
 }));
 
+// Mock react-native-google-mobile-ads
+jest.mock('react-native-google-mobile-ads', () => {
+  const React = require('react');
+  const { View } = require('react-native');
+
+  const mockListeners: { [event: string]: Function[] } = {};
+
+  const mockInterstitialInstance = {
+    load: jest.fn(() => {
+      setTimeout(() => {
+        if (mockListeners['loaded']) {
+          mockListeners['loaded'].forEach((cb) => cb());
+        }
+      }, 0);
+    }),
+    show: jest.fn().mockImplementation(() => {
+      setTimeout(() => {
+        if (mockListeners['closed']) {
+          mockListeners['closed'].forEach((cb) => cb());
+        }
+      }, 0);
+      return Promise.resolve();
+    }),
+    addAdEventListener: jest.fn((event: string, callback: Function) => {
+      if (!mockListeners[event]) {
+        mockListeners[event] = [];
+      }
+      mockListeners[event].push(callback);
+      return () => {
+        mockListeners[event] = (mockListeners[event] || []).filter((cb) => cb !== callback);
+      };
+    }),
+    removeAllListeners: jest.fn(() => {
+      Object.keys(mockListeners).forEach((k) => delete mockListeners[k]);
+    }),
+  };
+
+  return {
+    __esModule: true,
+    default: jest.fn(() => ({
+      initialize: jest.fn().mockResolvedValue([{ state: 'READY' }]),
+      setRequestConfiguration: jest.fn().mockResolvedValue(undefined),
+    })),
+    TestIds: {
+      BANNER: 'ca-app-pub-3940256099942544/6300978111',
+      INTERSTITIAL: 'ca-app-pub-3940256099942544/1033173712',
+      REWARDED: 'ca-app-pub-3940256099942544/5224354917',
+      APP_OPEN: 'ca-app-pub-3940256099942544/9257395921',
+    },
+    BannerAdSize: {
+      ANCHORED_ADAPTIVE_BANNER: 'ANCHORED_ADAPTIVE_BANNER',
+      BANNER: 'BANNER',
+      FULL_BANNER: 'FULL_BANNER',
+      LARGE_BANNER: 'LARGE_BANNER',
+      LEADERBOARD: 'LEADERBOARD',
+      MEDIUM_RECTANGLE: 'MEDIUM_RECTANGLE',
+    },
+    AdEventType: {
+      LOADED: 'loaded',
+      ERROR: 'error',
+      OPENED: 'opened',
+      CLOSED: 'closed',
+      CLICKED: 'clicked',
+    },
+    BannerAd: (props: any) =>
+      React.createElement(View, { ...props, testID: props.testID || 'mock-banner-ad' }),
+    InterstitialAd: {
+      createForAdRequest: jest.fn(() => mockInterstitialInstance),
+    },
+    AdsConsent: {
+      requestInfoUpdate: jest.fn().mockResolvedValue({
+        status: 'OBTAINED',
+        canRequestAds: true,
+        isConsentFormAvailable: false,
+        privacyOptionsRequirementStatus: 'NOT_REQUIRED',
+      }),
+      loadAndShowConsentFormIfRequired: jest.fn().mockResolvedValue({
+        status: 'OBTAINED',
+        canRequestAds: true,
+      }),
+      showPrivacyOptionsForm: jest.fn().mockResolvedValue({
+        status: 'OBTAINED',
+        canRequestAds: true,
+      }),
+      reset: jest.fn().mockResolvedValue(undefined),
+    },
+    AdsConsentStatus: {
+      UNKNOWN: 'UNKNOWN',
+      NOT_REQUIRED: 'NOT_REQUIRED',
+      REQUIRED: 'REQUIRED',
+      OBTAINED: 'OBTAINED',
+    },
+    AdsConsentPrivacyOptionsRequirementStatus: {
+      UNKNOWN: 'UNKNOWN',
+      NOT_REQUIRED: 'NOT_REQUIRED',
+      REQUIRED: 'REQUIRED',
+    },
+    AdsConsentDebugGeography: {
+      DISABLED: 0,
+      EEA: 1,
+      OTHER: 2,
+    },
+  };
+});
+
 // Global timers mock cleanup
 afterEach(() => {
   jest.clearAllMocks();
 });
+

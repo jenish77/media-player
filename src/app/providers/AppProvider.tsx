@@ -4,6 +4,8 @@ import { getDatabase } from '../../services/database/db';
 import { useSettingsStore } from '../../store/useSettingsStore';
 import { usePlaybackStore } from '../../store/usePlaybackStore';
 import { playbackPersistence } from '../../services/playbackPersistence';
+import { adConsentManager } from '../../services/ads/adConsentManager';
+import { interstitialAdController } from '../../services/ads/interstitialAdController';
 import { darkTheme } from '../../theme/colors';
 
 interface AppProviderProps {
@@ -24,6 +26,17 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         console.warn('Initialization warning:', err);
       } finally {
         setIsReady(true);
+        // Initialize AdMob consent and SDK non-blockingly without stalling app launch
+        adConsentManager
+          .initializeConsentAndAds()
+          .then((consentState) => {
+            if (consentState.canRequestAds) {
+              interstitialAdController.preload();
+            }
+          })
+          .catch((adErr) => {
+            console.warn('[AppProvider] Ad initialization notice:', adErr);
+          });
       }
     }
 

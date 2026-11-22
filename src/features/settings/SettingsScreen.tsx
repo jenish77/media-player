@@ -25,6 +25,7 @@ import {
 import { useSettingsStore } from '../../store/useSettingsStore';
 import { useLibraryStore } from '../../store/useLibraryStore';
 import { clearWatchHistory } from '../../services/database/mediaRepository';
+import { adConsentManager } from '../../services/ads/adConsentManager';
 import { palette, darkTheme } from '../../theme/colors';
 import { typography } from '../../theme/typography';
 import { borderRadius, spacing } from '../../theme/spacing';
@@ -53,6 +54,16 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ navigation }) =>
         },
       },
     ]);
+  };
+
+  const handleOpenPrivacyOptions = async () => {
+    const success = await adConsentManager.showPrivacyOptions();
+    if (!success) {
+      Alert.alert(
+        'Consent Preferences',
+        'Consent options are currently not required or not available in your region.',
+      );
+    }
   };
 
   const speedOptions = [0.75, 1.0, 1.25, 1.5, 2.0];
@@ -284,6 +295,19 @@ export const SettingsScreen: React.FC<SettingsScreenProps> = ({ navigation }) =>
             <View style={{ flex: 1 }}>
               <Text style={styles.actionTitle}>Nova Player Pro</Text>
               <Text style={styles.actionDesc}>Ad-free and advanced features</Text>
+            </View>
+            <ChevronRight size={18} color={palette.slate500} />
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.actionRow}
+            onPress={handleOpenPrivacyOptions}
+            testID="ad-privacy-button"
+          >
+            <ShieldCheck size={20} color={palette.primary400} style={styles.actionIcon} />
+            <View style={{ flex: 1 }}>
+              <Text style={styles.actionTitle}>Ad Privacy & Consent Preferences</Text>
+              <Text style={styles.actionDesc}>Manage personalized ads and GDPR consent</Text>
             </View>
             <ChevronRight size={18} color={palette.slate500} />
           </TouchableOpacity>
