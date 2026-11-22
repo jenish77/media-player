@@ -3,6 +3,7 @@ import { View, StyleSheet } from 'react-native';
 import { isAdsAvailable, getBannerAdUnitId, AD_REQUEST_OPTIONS } from '../../config/adConfig';
 import { isExpoGo } from '../../utils/environment';
 import { darkTheme } from '../../theme/colors';
+import { ErrorBoundary } from '../ErrorBoundary';
 
 // Dynamically import ads components only when running as native binary
 let BannerAd: any = null;
@@ -66,13 +67,15 @@ export function AdBanner({ position = 'bottom' }: AdBannerProps) {
       ]}
     >
       {!adError && (
-        <BannerAd
-          unitId={adUnitId}
-          size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
-          requestOptions={AD_REQUEST_OPTIONS}
-          onAdLoaded={handleAdLoaded}
-          onAdFailedToLoad={handleAdFailedToLoad}
-        />
+        <ErrorBoundary fallback={null}>
+          <BannerAd
+            unitId={adUnitId}
+            size={BannerAdSize.ANCHORED_ADAPTIVE_BANNER}
+            requestOptions={AD_REQUEST_OPTIONS}
+            onAdLoaded={handleAdLoaded}
+            onAdFailedToLoad={handleAdFailedToLoad}
+          />
+        </ErrorBoundary>
       )}
     </View>
   );

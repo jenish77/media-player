@@ -41,14 +41,18 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
           console.warn('Initial permission check error:', permErr);
         }
 
-        // Initialize Google Mobile Ads SDK in native build (non-blocking)
+        // Initialize Google Mobile Ads SDK safely in native build (non-blocking)
         if (!isExpoGo && mobileAds) {
-          // Fire and forget — don't block app startup on ad initialization
-          mobileAds()
-            .initialize()
-            .catch((adsErr: any) => {
-              console.warn('AdMob initialize warning:', adsErr);
-            });
+          try {
+            const instance = typeof mobileAds === 'function' ? mobileAds() : mobileAds;
+            if (instance && typeof instance.initialize === 'function') {
+              instance.initialize().catch((adsErr: any) => {
+                console.warn('AdMob initialize warning:', adsErr);
+              });
+            }
+          } catch (adsErr) {
+            console.warn('AdMob initialize warning:', adsErr);
+          }
         }
       } catch (err) {
         console.warn('Initialization warning:', err);
