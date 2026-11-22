@@ -7,6 +7,7 @@ import { playbackPersistence } from '../../services/playbackPersistence';
 import { darkTheme } from '../../theme/colors';
 import { requestMediaPermissions } from '../../services/mediaDiscovery/mediaDiscoveryService';
 import { isExpoGo } from '../../utils/environment';
+import { interstitialManager } from '../../services/ads/interstitialManager';
 
 // Dynamically import Mobile Ads SDK only in standalone native builds
 let mobileAds: any = null;
@@ -40,6 +41,11 @@ export const AppProvider: React.FC<AppProviderProps> = ({ children }) => {
         } catch (permErr) {
           console.warn('Initial permission check error:', permErr);
         }
+
+        // Initialize Interstitial Ad Manager in background
+        interstitialManager.initialize().catch((intErr) => {
+          console.warn('[AppProvider] Interstitial init warning:', intErr);
+        });
 
         // Initialize Google Mobile Ads SDK safely in native build (non-blocking)
         if (!isExpoGo && mobileAds) {

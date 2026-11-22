@@ -14,11 +14,21 @@ import { isExpoGo } from '../utils/environment';
 const TEST_BANNER_ANDROID = 'ca-app-pub-3940256099942544/6300978111';
 const TEST_BANNER_IOS = 'ca-app-pub-3940256099942544/2934735716';
 
+// Google official sample test interstitial unit IDs
+const TEST_INTERSTITIAL_ANDROID = 'ca-app-pub-3940256099942544/1033173712';
+const TEST_INTERSTITIAL_IOS = 'ca-app-pub-3940256099942544/4411468910';
+
 const ANDROID_BANNER_ID =
   process.env.EXPO_PUBLIC_ADMOB_ANDROID_BANNER_UNIT_ID || TEST_BANNER_ANDROID;
 
 const IOS_BANNER_ID =
   process.env.EXPO_PUBLIC_ADMOB_IOS_BANNER_UNIT_ID || TEST_BANNER_IOS;
+
+const ANDROID_INTERSTITIAL_ID =
+  process.env.EXPO_PUBLIC_ADMOB_ANDROID_INTERSTITIAL_UNIT_ID || TEST_INTERSTITIAL_ANDROID;
+
+const IOS_INTERSTITIAL_ID =
+  process.env.EXPO_PUBLIC_ADMOB_IOS_INTERSTITIAL_UNIT_ID || TEST_INTERSTITIAL_IOS;
 
 let _TestIds: any = null;
 let _adsAvailable = false;
@@ -62,6 +72,27 @@ export function getBannerAdUnitId(): string {
   }) ?? '';
 
   console.log('[adConfig] Release mode — banner unitId:', unitId);
+  return unitId;
+}
+
+/**
+ * Returns the appropriate interstitial ad unit ID based on platform and environment.
+ * In __DEV__ mode: returns SDK built-in test IDs.
+ * In release builds: returns the configured env var or official sample test ID.
+ */
+export function getInterstitialAdUnitId(): string {
+  if (isExpoGo || !_adsAvailable) return '';
+
+  if (__DEV__ && _TestIds?.INTERSTITIAL) {
+    return _TestIds.INTERSTITIAL;
+  }
+
+  const unitId = Platform.select({
+    android: ANDROID_INTERSTITIAL_ID,
+    ios: IOS_INTERSTITIAL_ID,
+    default: '',
+  }) ?? '';
+
   return unitId;
 }
 

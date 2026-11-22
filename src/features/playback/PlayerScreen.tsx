@@ -16,6 +16,7 @@ import { ErrorState } from '../../components/ErrorState';
 import { SubtitleAudioBottomSheet } from '../subtitles/SubtitleAudioBottomSheet';
 import { pickVideoFromDocumentPicker } from '../../services/mediaDiscovery/mediaDiscoveryService';
 import { AspectRatioMode } from '../../types/media';
+import { interstitialManager } from '../../services/ads/interstitialManager';
 
 let VideoViewComponent: any = null;
 try {
@@ -99,6 +100,31 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ navigation, route })
   const skipSeconds = settings.defaultSkipIntervalSeconds || 15;
 
   const isExitingRef = useRef(false);
+  const playbackStartTimeRef = useRef(Date.now());
+  const didEndNaturallyRef = useRef(false);
+  const previousMediaIdRef = useRef<string | null>(null);
+
+  // Track natural video completion
+  useEffect(() => {
+    if (state === 'completed') {
+      didEndNaturallyRef.current = true;
+    }
+  }, [state]);
+
+  // Track video transitions in queue/playlist
+  useEffect(() => {
+    if (currentMedia?.id && currentMedia.id !== previousMediaIdRef.current) {
+      if (previousMediaIdRef.current) {
+        const durationWatchedMs = Date.now() - playbackStartTimeRef.current;
+        interstitialManager
+          .recordVideoWatched(durationWatchedMs, didEndNaturallyRef.current)
+          .catch(() => {});
+      }
+      previousMediaIdRef.current = currentMedia.id;
+      playbackStartTimeRef.current = Date.now();
+      didEndNaturallyRef.current = false;
+    }
+  }, [currentMedia?.id]);
 
   const cleanupPlayback = useCallback(async () => {
     try {
@@ -126,7 +152,17 @@ export const PlayerScreen: React.FC<PlayerScreenProps> = ({ navigation, route })
     isExitingRef.current = true;
 
     try {
+      // Record completed video watch duration before teardown
+      const durationWatchedMs = Date.now() - playbackStartTimeRef.current;
+      await interstitialManager
+        .recordVideoWatched(durationWatchedMs, didEndNaturallyRef.current)
+        .catch(() => {});
+
+      // Completely stop and clean up media playback before any ad
       await cleanupPlayback();
+
+      // Show interstitial cautiously only if 3+ videos watched and 10-15m cooldown satisfied
+      await interstitialManager.maybeShowOnExit().catch(() => {});
     } finally {
       if (navigation?.canGoBack && navigation.canGoBack()) {
         navigation.goBack();
